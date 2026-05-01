@@ -2,6 +2,11 @@ name: docker-image
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (e.g. v6.9.36-0)'
+        required: false
+        type: string
   push:
     tags:
       - v*
@@ -29,7 +34,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          VERSION="${{ inputs.tag }}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          fi
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
@@ -65,7 +73,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          VERSION="${{ inputs.tag }}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          fi
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
@@ -100,7 +111,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Generate Build Metadata
         run: |
-          VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          VERSION="${{ inputs.tag }}"
+          if [ -z "$VERSION" ]; then
+            VERSION=$(grep -oP '^UPSTREAM_TAG=\K.*' .ccs-fork-upstream.env)
+          fi
           echo "VERSION=${VERSION}" >> $GITHUB_ENV
           echo COMMIT=`git rev-parse --short HEAD` >> $GITHUB_ENV
           echo BUILD_DATE=`date -u +%Y-%m-%dT%H:%M:%SZ` >> $GITHUB_ENV
