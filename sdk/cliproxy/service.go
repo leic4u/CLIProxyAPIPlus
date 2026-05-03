@@ -14,9 +14,11 @@ import (
 
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/api"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
+	internalredisqueue "github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/executor"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
+	internalusage "github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher"
 	"github.com/router-for-me/CLIProxyAPI/v6/internal/wsrelay"
 	sdkaccess "github.com/router-for-me/CLIProxyAPI/v6/sdk/access"
@@ -120,6 +122,11 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewGitLabAuthenticator(),
 	)
+}
+
+func applyKiroRuntimeConfig(cfg *config.Config) {
+	kiroauth.InitRateLimiterConfig(cfg)
+	kiroauth.InitSystemPromptInjectConfig(cfg)
 }
 
 func (s *Service) ensureAuthUpdateQueue(ctx context.Context) {
@@ -361,6 +368,16 @@ func (s *Service) applyRetryConfig(cfg *config.Config) {
 	s.coreManager.SetRetryConfig(cfg.RequestRetry, maxInterval, cfg.MaxRetryCredentials)
 }
 
+func (s *Service) applyUsageStatisticsConfig(cfg *config.Config) {
+	if cfg == nil {
+		internalusage.SetStatisticsEnabled(false)
+		internalredisqueue.SetUsageStatisticsEnabled(false)
+		return
+	}
+	internalusage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
+	internalredisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
+}
+
 func openAICompatInfoFromAuth(a *coreauth.Auth) (providerKey string, compatName string, ok bool) {
 	if a == nil {
 		return "", "", false
@@ -503,6 +520,7 @@ func (s *Service) Run(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	s.applyUsageStatisticsConfig(s.cfg)
 	usage.StartDefault(ctx)
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -518,6 +536,7 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 
 	s.applyRetryConfig(s.cfg)
+	applyKiroRuntimeConfig(s.cfg)
 
 	if s.coreManager != nil {
 		if errLoad := s.coreManager.Load(ctx); errLoad != nil {
@@ -698,6 +717,8 @@ func (s *Service) Run(ctx context.Context) error {
 		}
 
 		s.applyRetryConfig(newCfg)
+		s.applyUsageStatisticsConfig(newCfg)
+		applyKiroRuntimeConfig(newCfg)
 		s.applyPprofConfig(newCfg)
 		if s.server != nil {
 			s.server.UpdateClients(newCfg)
@@ -723,9 +744,8 @@ func (s *Service) Run(ctx context.Context) error {
 	}
 	watcherWrapper.SetConfig(s.cfg)
 
-	// 方案 A: 连接 Kiro 后台刷新器回调到 Watcher
-	// 当后台刷新器成功刷新 token 后，立即通知 Watcher 更新内存中的 Auth 对象
-	// 这解决了后台刷新与内存 Auth 对象之间的时间差问题
+	// Connect the Kiro refresh callback to the watcher so in-memory auth state
+	// is updated immediately after background refresh succeeds.
 	kiroauth.GetRefreshManager().SetOnTokenRefreshed(func(tokenID string, tokenData *kiroauth.KiroTokenData) {
 		if tokenData == nil || watcherWrapper == nil {
 			return
@@ -975,6 +995,13 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "kiro":
 		models = s.fetchKiroModels(a)
+		// Filter out agentic variants when system prompt injection is disabled,
+		// since the agentic prompt is delivered via system prompt injection.
+		// Use the runtime global flag (not config field) to stay consistent
+		// with the translator's actual behavior.
+		if !kirocommon.IsSystemPromptInjectEnabled() {
+			models = filterAgenticVariants(models)
+		}
 		models = applyExcludedModels(models, excluded)
 	case "kilo":
 		models = executor.FetchKiloModels(context.Background(), a, s.cfg)
@@ -1761,6 +1788,20 @@ func formatKiroDisplayName(modelName string, rateMultiplier float64) string {
 	}
 
 	return displayName
+}
+
+// filterAgenticVariants removes -agentic model variants from the list.
+// Used when system prompt injection is disabled, since the agentic prompt
+// is delivered via system prompt injection and would have no effect.
+func filterAgenticVariants(models []*ModelInfo) []*ModelInfo {
+	result := make([]*ModelInfo, 0, len(models))
+	for _, m := range models {
+		if m != nil && strings.HasSuffix(m.ID, "-agentic") {
+			continue
+		}
+		result = append(result, m)
+	}
+	return result
 }
 
 // generateKiroAgenticVariants generates agentic variants for Kiro models.
