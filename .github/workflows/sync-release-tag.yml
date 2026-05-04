@@ -43,14 +43,18 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           UPSTREAM_TAG=""
+          ENV_UPSTREAM_TAG=""
 
           if [ -f .ccs-fork-upstream.env ]; then
             # shellcheck disable=SC1091
             . ./.ccs-fork-upstream.env
+            ENV_UPSTREAM_TAG="${UPSTREAM_TAG}"
           fi
 
+          UPSTREAM_TAG=$(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+
           if ! echo "${UPSTREAM_TAG}" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
-            UPSTREAM_TAG=$(git tag --merged HEAD --list 'v[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -1 || true)
+            UPSTREAM_TAG="${ENV_UPSTREAM_TAG}"
           fi
 
           if [ -z "$UPSTREAM_TAG" ]; then
