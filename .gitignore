@@ -55,4 +55,19 @@ _bmad-output/*
 # macOS
 .DS_Store
 ._*
+
+# Opencode
+.beads/
+.opencode/
+.cli-proxy-api/
+.venv/
+*.bak
+*.json
+.cli-proxy-api/
+.sisyphus/
+.tldr/
+server
 .gocache/
+chat.txt
+*.orig
+*.patch

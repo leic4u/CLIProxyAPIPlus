@@ -5,9 +5,9 @@ import (
 	"strconv"
 	"strings"
 
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/watcher/diff"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/watcher/diff"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -33,6 +33,8 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
+	// Ollama API Keys
+	out = append(out, s.synthesizeOllamaKeys(ctx)...)
 	// Kiro (AWS CodeWhisperer)
 	out = append(out, s.synthesizeKiroKeys(ctx)...)
 	// OpenAI-compat
@@ -64,8 +66,15 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			"source":  fmt.Sprintf("config:gemini[%s]", token),
 			"api_key": key,
 		}
+		metadata := map[string]any{}
+		if entry.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if entry.BillingClass != "" {
+			attrs["billing_class"] = string(entry.BillingClass)
 		}
 		if base != "" {
 			attrs["base_url"] = base
@@ -82,10 +91,14 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
+			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
 		out = append(out, a)
 	}
 	return out
@@ -111,8 +124,15 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			"source":  fmt.Sprintf("config:claude[%s]", token),
 			"api_key": key,
 		}
+		metadata := map[string]any{}
+		if ck.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
+		}
+		if ck.BillingClass != "" {
+			attrs["billing_class"] = string(ck.BillingClass)
 		}
 		if base != "" {
 			attrs["base_url"] = base
@@ -130,10 +150,14 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
+			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
 		out = append(out, a)
 	}
 	return out
@@ -158,8 +182,15 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			"source":  fmt.Sprintf("config:codex[%s]", token),
 			"api_key": key,
 		}
+		metadata := map[string]any{}
+		if ck.DisableCooling {
+			metadata["disable_cooling"] = true
+		}
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
+		}
+		if ck.BillingClass != "" {
+			attrs["billing_class"] = string(ck.BillingClass)
 		}
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
@@ -180,10 +211,65 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 			Status:     coreauth.StatusActive,
 			ProxyURL:   proxyURL,
 			Attributes: attrs,
+			Metadata:   metadata,
 			CreatedAt:  now,
 			UpdatedAt:  now,
 		}
 		ApplyAuthExcludedModelsMeta(a, cfg, ck.ExcludedModels, "apikey")
+		if len(a.Metadata) == 0 {
+			a.Metadata = nil
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// synthesizeOllamaKeys creates Auth entries for Ollama Cloud API keys.
+func (s *ConfigSynthesizer) synthesizeOllamaKeys(ctx *SynthesisContext) []*coreauth.Auth {
+	cfg := ctx.Config
+	now := ctx.Now
+	idGen := ctx.IDGenerator
+
+	out := make([]*coreauth.Auth, 0, len(cfg.OllamaKey))
+	for i := range cfg.OllamaKey {
+		entry := cfg.OllamaKey[i]
+		key := strings.TrimSpace(entry.APIKey)
+		if key == "" {
+			continue
+		}
+		base := strings.TrimSpace(entry.BaseURL)
+		prefix := strings.TrimSpace(entry.Prefix)
+		proxyURL := strings.TrimSpace(entry.ProxyURL)
+		id, token := idGen.Next("ollama:apikey", key, base)
+		attrs := map[string]string{
+			"source":  fmt.Sprintf("config:ollama[%s]", token),
+			"api_key": key,
+		}
+		if base != "" {
+			attrs["base_url"] = base
+		}
+		if entry.Priority != 0 {
+			attrs["priority"] = strconv.Itoa(entry.Priority)
+		}
+		if entry.BillingClass != "" {
+			attrs["billing_class"] = string(entry.BillingClass)
+		}
+		if hash := diff.ComputeOllamaModelsHash(entry.Models); hash != "" {
+			attrs["models_hash"] = hash
+		}
+		addConfigHeadersToAttrs(entry.Headers, attrs)
+		a := &coreauth.Auth{
+			ID:         id,
+			Provider:   "ollama",
+			Label:      "ollama-apikey",
+			Prefix:     prefix,
+			Status:     coreauth.StatusActive,
+			ProxyURL:   proxyURL,
+			Attributes: attrs,
+			CreatedAt:  now,
+			UpdatedAt:  now,
+		}
+		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out
@@ -207,6 +293,7 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			providerName = "openai-compatibility"
 		}
 		base := strings.TrimSpace(compat.BaseURL)
+		disableCooling := compat.DisableCooling
 
 		// Handle new APIKeyEntries format (preferred)
 		createdEntries := 0
@@ -222,8 +309,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
 			}
+			metadata := map[string]any{}
+			if disableCooling {
+				metadata["disable_cooling"] = true
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if compat.BillingClass != "" {
+				attrs["billing_class"] = string(compat.BillingClass)
 			}
 			if key != "" {
 				attrs["api_key"] = key
@@ -240,8 +334,12 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				Status:     coreauth.StatusActive,
 				ProxyURL:   proxyURL,
 				Attributes: attrs,
+				Metadata:   metadata,
 				CreatedAt:  now,
 				UpdatedAt:  now,
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
 			}
 			out = append(out, a)
 			createdEntries++
@@ -256,8 +354,15 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				"compat_name":  compat.Name,
 				"provider_key": providerName,
 			}
+			metadata := map[string]any{}
+			if disableCooling {
+				metadata["disable_cooling"] = true
+			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
+			}
+			if compat.BillingClass != "" {
+				attrs["billing_class"] = string(compat.BillingClass)
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
@@ -270,8 +375,12 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 				Prefix:     prefix,
 				Status:     coreauth.StatusActive,
 				Attributes: attrs,
+				Metadata:   metadata,
 				CreatedAt:  now,
 				UpdatedAt:  now,
+			}
+			if len(a.Metadata) == 0 {
+				a.Metadata = nil
 			}
 			out = append(out, a)
 		}
@@ -303,6 +412,9 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		}
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
+		}
+		if compat.BillingClass != "" {
+			attrs["billing_class"] = string(compat.BillingClass)
 		}
 		if key != "" {
 			attrs["api_key"] = key

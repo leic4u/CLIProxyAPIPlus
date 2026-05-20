@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
 
 // FileTokenStore persists token records and auth metadata using the filesystem as backing storage.
@@ -52,7 +52,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	if auth.Disabled && !shouldPersistDisabledAuth(auth) {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
@@ -72,6 +72,8 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 
 	switch {
 	case auth.Storage != nil:
+		cliproxyauth.SyncPrimaryInfoMetadata(auth)
+		auth.Metadata["disabled"] = auth.Disabled
 		if setter, ok := auth.Storage.(metadataSetter); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -79,6 +81,7 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 			return "", err
 		}
 	case auth.Metadata != nil:
+		cliproxyauth.SyncPrimaryInfoMetadata(auth)
 		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
@@ -120,6 +123,19 @@ func (s *FileTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (str
 	}
 
 	return path, nil
+}
+
+func shouldPersistDisabledAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(auth.Provider), "antigravity") {
+		return false
+	}
+	if auth.PrimaryInfo == nil {
+		return false
+	}
+	return !auth.PrimaryInfo.IsPrimary
 }
 
 // List enumerates all auth JSON files under the configured directory.
@@ -194,9 +210,7 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
-	if provider == "" {
-		provider = "unknown"
-	}
+	provider = canonicalizeAuthProvider(provider)
 	if provider == "antigravity" || provider == "gemini" {
 		projectID := ""
 		if pid, ok := metadata["project_id"].(string); ok {
@@ -238,11 +252,23 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		status = cliproxyauth.StatusDisabled
 	}
 
-	// Calculate NextRefreshAfter from expires_at (20 minutes before expiry)
 	var nextRefreshAfter time.Time
 	if expiresAtStr, ok := metadata["expires_at"].(string); ok && expiresAtStr != "" {
 		if expiresAt, err := time.Parse(time.RFC3339, expiresAtStr); err == nil {
 			nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
+		}
+	}
+
+	if nextRefreshAfter.IsZero() {
+		if expiredStr, ok := metadata["expired"].(string); ok && expiredStr != "" {
+			if expiresAt, err := time.Parse(time.RFC3339, expiredStr); err == nil {
+				refreshLead := 24 * time.Hour
+				if provider == "iflow" {
+					nextRefreshAfter = expiresAt.Add(-refreshLead)
+				} else {
+					nextRefreshAfter = expiresAt.Add(-20 * time.Minute)
+				}
+			}
 		}
 	}
 
@@ -260,11 +286,39 @@ func (s *FileTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth,
 		LastRefreshedAt:  time.Time{},
 		NextRefreshAfter: nextRefreshAfter,
 	}
+	if provider == "antigravity" {
+		auth.PrimaryInfo = extractPrimaryInfo(metadata)
+	}
 	if email, ok := metadata["email"].(string); ok && email != "" {
 		auth.Attributes["email"] = email
 	}
 	cliproxyauth.ApplyCustomHeadersFromMetadata(auth)
 	return auth, nil
+}
+func extractPrimaryInfo(metadata map[string]any) *cliproxyauth.PrimaryInfo {
+	if metadata == nil {
+		return nil
+	}
+	rawPrimaryInfo, ok := metadata["primary_info"]
+	if !ok {
+		return nil
+	}
+	primaryInfoMap, ok := rawPrimaryInfo.(map[string]any)
+	if !ok {
+		return nil
+	}
+	isPrimary, ok := primaryInfoMap["is_primary"].(bool)
+	if !ok {
+		return nil
+	}
+	order := 0
+	switch value := primaryInfoMap["order"].(type) {
+	case float64:
+		order = int(value)
+	case int:
+		order = value
+	}
+	return &cliproxyauth.PrimaryInfo{IsPrimary: isPrimary, Order: order}
 }
 
 func (s *FileTokenStore) idFor(path, baseDir string) string {

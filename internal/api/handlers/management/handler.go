@@ -13,11 +13,10 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -48,6 +47,8 @@ type Handler struct {
 	envSecret           string
 	logDir              string
 	postAuthHook        coreauth.PostAuthHook
+	onConfigApplied     func(*config.Config)
+	apiKeyIPBlacklist   *APIKeyIPBlacklistStore
 }
 
 // NewHandler creates a new management handler instance.
@@ -64,6 +65,7 @@ func NewHandler(cfg *config.Config, configFilePath string, manager *coreauth.Man
 		tokenStore:          sdkAuth.GetTokenStore(),
 		allowRemoteOverride: envSecret != "",
 		envSecret:           envSecret,
+		apiKeyIPBlacklist:   NewAPIKeyIPBlacklistStore(APIKeyIPBlacklistPolicyFromConfig(cfg)),
 	}
 	h.startAttemptCleanup()
 	return h
@@ -111,7 +113,27 @@ func (h *Handler) SetConfig(cfg *config.Config) {
 	}
 	h.mu.Lock()
 	h.cfg = cfg
+	manager := h.authManager
+	apiKeyIPBlacklist := h.apiKeyIPBlacklist
 	h.mu.Unlock()
+	if apiKeyIPBlacklist != nil {
+		apiKeyIPBlacklist.UpdatePolicy(APIKeyIPBlacklistPolicyFromConfig(cfg))
+	}
+	if manager != nil {
+		var aliases map[string][]config.OAuthModelAlias
+		var fallbackModels map[string]string
+		var fallbackChain []string
+		var fallbackMaxDepth int
+		if cfg != nil {
+			aliases = cfg.OAuthModelAlias
+			fallbackModels = cfg.Routing.FallbackModels
+			fallbackChain = cfg.Routing.FallbackChain
+			fallbackMaxDepth = cfg.Routing.FallbackMaxDepth
+		}
+		manager.SetOAuthModelAlias(aliases)
+		manager.SetFallbackModels(fallbackModels)
+		manager.SetFallbackChain(fallbackChain, fallbackMaxDepth)
+	}
 }
 
 // SetAuthManager updates the auth manager reference used by management endpoints.
@@ -121,7 +143,23 @@ func (h *Handler) SetAuthManager(manager *coreauth.Manager) {
 	}
 	h.mu.Lock()
 	h.authManager = manager
+	cfg := h.cfg
 	h.mu.Unlock()
+	if manager != nil {
+		var aliases map[string][]config.OAuthModelAlias
+		var fallbackModels map[string]string
+		var fallbackChain []string
+		var fallbackMaxDepth int
+		if cfg != nil {
+			aliases = cfg.OAuthModelAlias
+			fallbackModels = cfg.Routing.FallbackModels
+			fallbackChain = cfg.Routing.FallbackChain
+			fallbackMaxDepth = cfg.Routing.FallbackMaxDepth
+		}
+		manager.SetOAuthModelAlias(aliases)
+		manager.SetFallbackModels(fallbackModels)
+		manager.SetFallbackChain(fallbackChain, fallbackMaxDepth)
+	}
 }
 
 // SetUsageStatistics allows replacing the usage statistics reference.
@@ -146,6 +184,21 @@ func (h *Handler) SetLogDirectory(dir string) {
 // SetPostAuthHook registers a hook to be called after auth record creation but before persistence.
 func (h *Handler) SetPostAuthHook(hook coreauth.PostAuthHook) {
 	h.postAuthHook = hook
+}
+
+// SetOnConfigApplied registers a callback invoked after config persistence/reload succeeds.
+func (h *Handler) SetOnConfigApplied(fn func(*config.Config)) {
+	h.onConfigApplied = fn
+}
+
+func (h *Handler) applyRuntimeConfig(cfg *config.Config) {
+	if h == nil || cfg == nil {
+		return
+	}
+	h.SetConfig(cfg)
+	if h.onConfigApplied != nil {
+		h.onConfigApplied(cfg)
+	}
 }
 
 // Middleware enforces access control for management endpoints.
@@ -287,8 +340,13 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 // persist saves the current in-memory config to disk.
 func (h *Handler) persist(c *gin.Context) bool {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.persistLocked(c)
+	ok := h.persistLocked(c)
+	cfg := h.cfg
+	h.mu.Unlock()
+	if ok {
+		h.applyRuntimeConfig(cfg)
+	}
+	return ok
 }
 
 // persistLocked saves the current in-memory config to disk.

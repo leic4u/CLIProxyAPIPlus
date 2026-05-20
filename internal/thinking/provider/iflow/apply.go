@@ -11,8 +11,8 @@ package iflow
 import (
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -154,7 +154,7 @@ func isEnableThinkingModel(modelID string) bool {
 	}
 	id := strings.ToLower(modelID)
 	switch id {
-	case "deepseek-v3.2", "deepseek-v3.1":
+	case "qwen3-max-preview", "deepseek-v3.2", "deepseek-v3.1":
 		return true
 	default:
 		return false

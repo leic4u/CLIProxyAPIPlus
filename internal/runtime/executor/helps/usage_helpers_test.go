@@ -5,7 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	"github.com/gin-gonic/gin"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 func TestParseOpenAIUsageChatCompletions(t *testing.T) {
@@ -45,6 +46,44 @@ func TestParseOpenAIUsageResponses(t *testing.T) {
 	}
 	if detail.ReasoningTokens != 9 {
 		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 9)
+	}
+}
+
+func TestParseOpenAIUsageIgnoresNullUsage(t *testing.T) {
+	data := []byte(`{"usage":null}`)
+	detail := ParseOpenAIUsage(data)
+	if detail != (usage.Detail{}) {
+		t.Fatalf("detail = %+v, want zero detail", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageIgnoresNullUsage(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}],"usage":null}`)
+	if detail, ok := ParseOpenAIStreamUsage(line); ok {
+		t.Fatalf("ParseOpenAIStreamUsage() = (%+v, true), want false for null usage", detail)
+	}
+}
+
+func TestParseOpenAIStreamUsageResponsesFields(t *testing.T) {
+	line := []byte(`data: {"id":"chunk_1","object":"chat.completion.chunk","choices":[],"usage":{"input_tokens":8,"output_tokens":5,"total_tokens":13,"input_tokens_details":{"cached_tokens":3},"output_tokens_details":{"reasoning_tokens":2}}}`)
+	detail, ok := ParseOpenAIStreamUsage(line)
+	if !ok {
+		t.Fatal("ParseOpenAIStreamUsage() ok = false, want true")
+	}
+	if detail.InputTokens != 8 {
+		t.Fatalf("input tokens = %d, want %d", detail.InputTokens, 8)
+	}
+	if detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", detail.OutputTokens, 5)
+	}
+	if detail.TotalTokens != 13 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 13)
+	}
+	if detail.CachedTokens != 3 {
+		t.Fatalf("cached tokens = %d, want %d", detail.CachedTokens, 3)
+	}
+	if detail.ReasoningTokens != 2 {
+		t.Fatalf("reasoning tokens = %d, want %d", detail.ReasoningTokens, 2)
 	}
 }
 
@@ -105,6 +144,47 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 	if record.Latency > 3*time.Second {
 		t.Fatalf("latency = %v, want <= 3s", record.Latency)
+	}
+}
+
+func TestStoreUsageDetailInContext(t *testing.T) {
+	c := &gin.Context{}
+	ctx := context.WithValue(context.Background(), "gin", c)
+
+	detail := usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    200,
+		TotalTokens:     300,
+		CachedTokens:    50,
+		ReasoningTokens: 10,
+	}
+
+	storeUsageDetailInContext(ctx, detail)
+
+	stored, exists := c.Get("usageDetail")
+	if !exists {
+		t.Fatal("usageDetail not stored in gin context")
+	}
+
+	storedDetail, ok := stored.(usage.Detail)
+	if !ok {
+		t.Fatalf("stored value is not usage.Detail, got %T", stored)
+	}
+
+	if storedDetail.InputTokens != 100 {
+		t.Fatalf("InputTokens = %d, want 100", storedDetail.InputTokens)
+	}
+	if storedDetail.OutputTokens != 200 {
+		t.Fatalf("OutputTokens = %d, want 200", storedDetail.OutputTokens)
+	}
+	if storedDetail.TotalTokens != 300 {
+		t.Fatalf("TotalTokens = %d, want 300", storedDetail.TotalTokens)
+	}
+	if storedDetail.CachedTokens != 50 {
+		t.Fatalf("CachedTokens = %d, want 50", storedDetail.CachedTokens)
+	}
+	if storedDetail.ReasoningTokens != 10 {
+		t.Fatalf("ReasoningTokens = %d, want 10", storedDetail.ReasoningTokens)
 	}
 }
 

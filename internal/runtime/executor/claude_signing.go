@@ -6,8 +6,8 @@ import (
 	"strings"
 
 	xxHash64 "github.com/pierrec/xxHash/xxHash64"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -45,7 +45,7 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		return nil
 	}
 
-	apiKey, baseURL := claudeCreds(auth)
+	apiKey, baseURL := claudeCredsForAuthLookup(auth)
 	if apiKey == "" {
 		return nil
 	}
@@ -55,6 +55,9 @@ func resolveClaudeKeyConfig(cfg *config.Config, auth *cliproxyauth.Auth) *config
 		cfgKey := strings.TrimSpace(entry.APIKey)
 		cfgBase := strings.TrimSpace(entry.BaseURL)
 		if !strings.EqualFold(cfgKey, apiKey) {
+			continue
+		}
+		if baseURL == "" && cfgBase != "" {
 			continue
 		}
 		if baseURL != "" && cfgBase != "" && !strings.EqualFold(cfgBase, baseURL) {

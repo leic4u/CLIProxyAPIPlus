@@ -13,13 +13,13 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/interfaces"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/thinking"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/api/handlers"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/interfaces"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/api/handlers"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -104,6 +104,15 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 	var lastRequest []byte
 	lastResponseOutput := []byte("[]")
 	pinnedAuthID := ""
+	sessionAuthByID := func(authID string) (*coreauth.Auth, bool) {
+		if h == nil || h.AuthManager == nil {
+			return nil, false
+		}
+		if auth, ok := h.AuthManager.GetExecutionSessionAuthByID(passthroughSessionID, authID); ok {
+			return auth, true
+		}
+		return h.AuthManager.GetByID(authID)
+	}
 	forceTranscriptReplayNextRequest := false
 
 	for {
@@ -130,8 +139,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		appendWebsocketTimelineEvent(&wsTimelineLog, "request", payload, time.Now())
 
 		allowIncrementalInputWithPreviousResponseID := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+		if pinnedAuthID != "" {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowIncrementalInputWithPreviousResponseID = websocketUpstreamSupportsIncrementalInput(pinnedAuth.Attributes, pinnedAuth.Metadata)
 			}
 		} else {
@@ -146,8 +155,8 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 		}
 
 		allowCompactionReplayBypass := false
-		if pinnedAuthID != "" && h != nil && h.AuthManager != nil {
-			if pinnedAuth, ok := h.AuthManager.GetByID(pinnedAuthID); ok && pinnedAuth != nil {
+		if pinnedAuthID != "" {
+			if pinnedAuth, ok := sessionAuthByID(pinnedAuthID); ok && pinnedAuth != nil {
 				allowCompactionReplayBypass = responsesWebsocketAuthSupportsCompactionReplay(pinnedAuth)
 			}
 		} else {
@@ -228,7 +237,7 @@ func (h *OpenAIResponsesAPIHandler) ResponsesWebsocket(c *gin.Context) {
 				if authID == "" || h == nil || h.AuthManager == nil {
 					return
 				}
-				selectedAuth, ok := h.AuthManager.GetByID(authID)
+				selectedAuth, ok := sessionAuthByID(authID)
 				if !ok || selectedAuth == nil {
 					return
 				}
@@ -580,7 +589,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 		return nil, ""
 	}
 	resolvedModelName := responsesWebsocketResolvedModelName(modelName)
-	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
+	providerSet, modelKey := h.responsesWebsocketProviderSetForModel(resolvedModelName)
 	if len(providerSet) == 0 {
 		return nil, modelKey
 	}
@@ -590,7 +599,17 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 	auths := h.AuthManager.List()
 	available := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
-		if !responsesWebsocketAuthMatchesModel(auth, providerSet, modelKey, registryRef, now) {
+		resolvedForAuth := modelKey
+		if h.AuthManager != nil {
+			if !h.AuthManager.AuthSupportsRouteModel(auth, resolvedModelName) {
+				continue
+			}
+			resolvedForAuth = h.AuthManager.ResolveRouteModelForAuth(auth, resolvedModelName)
+			if strings.TrimSpace(resolvedForAuth) == "" {
+				resolvedForAuth = modelKey
+			}
+		}
+		if !responsesWebsocketAuthMatchesModel(auth, providerSet, resolvedForAuth, registryRef, now) {
 			continue
 		}
 		available = append(available, auth)
@@ -610,12 +629,18 @@ func responsesWebsocketResolvedModelName(modelName string) string {
 	return util.ResolveAutoModel(modelName)
 }
 
-func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 	providers := util.GetProviderName(baseModel)
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
+	}
+	if len(providers) == 0 && h != nil && h.AuthManager != nil {
+		providers = h.AuthManager.ProvidersForRouteModel(resolvedModelName)
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = h.AuthManager.ProvidersForRouteModel(baseModel)
+		}
 	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {

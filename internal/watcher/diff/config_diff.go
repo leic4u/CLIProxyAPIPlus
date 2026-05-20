@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"strings"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // BuildConfigChangeDetails computes a redacted, human-readable list of config changes.
@@ -93,6 +93,12 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.Routing.Strategy != newCfg.Routing.Strategy {
 		changes = append(changes, fmt.Sprintf("routing.strategy: %s -> %s", oldCfg.Routing.Strategy, newCfg.Routing.Strategy))
 	}
+	if !reflect.DeepEqual(oldCfg.Routing.TokenThresholdRules, newCfg.Routing.TokenThresholdRules) {
+		changes = append(changes, fmt.Sprintf("routing.token-threshold-rules: %d -> %d entries", len(oldCfg.Routing.TokenThresholdRules), len(newCfg.Routing.TokenThresholdRules)))
+	}
+	if !reflect.DeepEqual(oldCfg.Payload, newCfg.Payload) {
+		changes = appendPayloadConfigChanges(changes, oldCfg.Payload, newCfg.Payload)
+	}
 
 	// API keys (redacted) and counts
 	if len(oldCfg.APIKeys) != len(newCfg.APIKeys) {
@@ -114,6 +120,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(string(o.BillingClass)) != strings.TrimSpace(string(n.BillingClass)) {
+				changes = append(changes, fmt.Sprintf("gemini[%d].billing-class: %s -> %s", i, strings.TrimSpace(string(o.BillingClass)), strings.TrimSpace(string(n.BillingClass))))
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("gemini[%d].api-key: updated", i))
@@ -149,6 +158,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			}
 			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
 				changes = append(changes, fmt.Sprintf("claude[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(string(o.BillingClass)) != strings.TrimSpace(string(n.BillingClass)) {
+				changes = append(changes, fmt.Sprintf("claude[%d].billing-class: %s -> %s", i, strings.TrimSpace(string(o.BillingClass)), strings.TrimSpace(string(n.BillingClass))))
 			}
 			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
 				changes = append(changes, fmt.Sprintf("claude[%d].api-key: updated", i))
@@ -336,6 +348,29 @@ func trimStrings(in []string) []string {
 		out[i] = strings.TrimSpace(in[i])
 	}
 	return out
+}
+
+func appendPayloadConfigChanges(changes []string, oldPayload, newPayload config.PayloadConfig) []string {
+	changes = appendPayloadRuleChanges(changes, "default", oldPayload.Default, newPayload.Default)
+	changes = appendPayloadRuleChanges(changes, "default-raw", oldPayload.DefaultRaw, newPayload.DefaultRaw)
+	changes = appendPayloadRuleChanges(changes, "override", oldPayload.Override, newPayload.Override)
+	changes = appendPayloadRuleChanges(changes, "override-raw", oldPayload.OverrideRaw, newPayload.OverrideRaw)
+	changes = appendPayloadFilterRuleChanges(changes, "filter", oldPayload.Filter, newPayload.Filter)
+	return changes
+}
+
+func appendPayloadRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadRule) []string {
+	if reflect.DeepEqual(oldRules, newRules) {
+		return changes
+	}
+	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
+}
+
+func appendPayloadFilterRuleChanges(changes []string, section string, oldRules, newRules []config.PayloadFilterRule) []string {
+	if reflect.DeepEqual(oldRules, newRules) {
+		return changes
+	}
+	return append(changes, fmt.Sprintf("payload.%s: updated (%d -> %d rules)", section, len(oldRules), len(newRules)))
 }
 
 func equalStringMap(a, b map[string]string) bool {

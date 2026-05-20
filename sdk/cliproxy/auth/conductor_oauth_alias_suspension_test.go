@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	internalconfig "github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	coreusage "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
+	internalconfig "github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
 type aliasRoutingExecutor struct {
@@ -61,6 +61,113 @@ func (e *aliasRoutingExecutor) ExecuteAliases() []string {
 	out := make([]string, len(e.executeAliases))
 	copy(out, e.executeAliases)
 	return out
+}
+
+func TestManagerExecute_OAuthAliasUsesConfiguredUpstreamWhenRegistryAdvertisesPlainAliasModel(t *testing.T) {
+	const (
+		provider    = "claude"
+		routeModel  = "sonnet"
+		targetModel = "claude-sonnet-4-6"
+	)
+
+	manager := NewManager(nil, nil, nil)
+	executor := &aliasRoutingExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{
+			Name:  targetModel,
+			Alias: routeModel,
+			Fork:  true,
+		}},
+	})
+
+	auth := &Auth{
+		ID:       "oauth-plain-alias-auth",
+		Provider: provider,
+		Status:   StatusActive,
+		Attributes: map[string]string{
+			"auth_kind": "oauth",
+		},
+		Metadata: map[string]any{"email": "tester@example.com"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: routeModel}, {ID: targetModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	resp, errExecute := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != targetModel {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), targetModel)
+	}
+
+	gotModels := executor.ExecuteModels()
+	if len(gotModels) != 1 {
+		t.Fatalf("execute models len = %d, want 1", len(gotModels))
+	}
+	if gotModels[0] != targetModel {
+		t.Fatalf("execute model = %q, want %q", gotModels[0], targetModel)
+	}
+}
+
+func TestManagerExecute_GitHubCopilotOAuthAliasUsesCanonicalUpstreamModel(t *testing.T) {
+	const (
+		provider    = "github-copilot"
+		routeModel  = "claude-sonnet-4-6"
+		targetModel = "claude-sonnet-4.6"
+	)
+
+	manager := NewManager(nil, nil, nil)
+	executor := &aliasRoutingExecutor{id: provider}
+	manager.RegisterExecutor(executor)
+	manager.SetOAuthModelAlias(map[string][]internalconfig.OAuthModelAlias{
+		provider: {{
+			Name:  targetModel,
+			Alias: routeModel,
+			Fork:  true,
+		}},
+	})
+
+	auth := &Auth{
+		ID:       "copilot-oauth-alias-auth",
+		Provider: provider,
+		Status:   StatusActive,
+		Metadata: map[string]any{"login": "tester"},
+	}
+	if _, errRegister := manager.Register(context.Background(), auth); errRegister != nil {
+		t.Fatalf("register auth: %v", errRegister)
+	}
+
+	reg := registry.GetGlobalRegistry()
+	reg.RegisterClient(auth.ID, provider, []*registry.ModelInfo{{ID: targetModel}})
+	t.Cleanup(func() {
+		reg.UnregisterClient(auth.ID)
+	})
+	manager.RefreshSchedulerEntry(auth.ID)
+
+	resp, errExecute := manager.Execute(context.Background(), []string{provider}, cliproxyexecutor.Request{Model: routeModel}, cliproxyexecutor.Options{})
+	if errExecute != nil {
+		t.Fatalf("execute error = %v, want success", errExecute)
+	}
+	if string(resp.Payload) != targetModel {
+		t.Fatalf("execute payload = %q, want %q", string(resp.Payload), targetModel)
+	}
+
+	gotModels := executor.ExecuteModels()
+	if len(gotModels) != 1 {
+		t.Fatalf("execute models len = %d, want 1", len(gotModels))
+	}
+	if gotModels[0] != targetModel {
+		t.Fatalf("execute model = %q, want canonical upstream %q", gotModels[0], targetModel)
+	}
 }
 
 func TestManagerExecute_OAuthAliasBypassesBlockedRouteModel(t *testing.T) {

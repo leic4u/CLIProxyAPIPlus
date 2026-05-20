@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sync/singleflight"
 )
@@ -136,6 +136,7 @@ type tokenResponse struct {
 // and refreshing expired tokens using PKCE for enhanced security.
 type ClaudeAuth struct {
 	httpClient *http.Client
+	cfg        *config.Config
 }
 
 // NewClaudeAuth creates a new Anthropic authentication service.
@@ -172,7 +173,36 @@ func NewClaudeAuthWithProxyURL(cfg *config.Config, proxyURL string) *ClaudeAuth 
 	// Cloudflare's bot detection on Anthropic domains
 	return &ClaudeAuth{
 		httpClient: NewAnthropicHttpClient(sdkCfg),
+		cfg:        cfg,
 	}
+}
+
+// authEndpoint returns the authorization endpoint, checking for config override.
+func (o *ClaudeAuth) authEndpoint() string {
+	if o.cfg != nil {
+		override := o.cfg.GetOAuthEndpointOverride("claude")
+		if ep := strings.TrimSpace(override.AuthorizeURL); ep != "" {
+			return ep
+		}
+	}
+	return AuthURL
+}
+
+// tokenEndpoint returns the token endpoint, checking for config override.
+// For refresh operations, RefreshURL is used if set; otherwise TokenURL is used.
+func (o *ClaudeAuth) tokenEndpoint(forRefresh bool) string {
+	if o.cfg != nil {
+		override := o.cfg.GetOAuthEndpointOverride("claude")
+		if forRefresh {
+			if ep := strings.TrimSpace(override.RefreshURL); ep != "" {
+				return ep
+			}
+		}
+		if ep := strings.TrimSpace(override.TokenURL); ep != "" {
+			return ep
+		}
+	}
+	return TokenURL
 }
 
 // GenerateAuthURL creates the OAuth authorization URL with PKCE.
@@ -203,7 +233,7 @@ func (o *ClaudeAuth) GenerateAuthURL(state string, pkceCodes *PKCECodes) (string
 		"state":                 {state},
 	}
 
-	authURL := fmt.Sprintf("%s?%s", AuthURL, params.Encode())
+	authURL := fmt.Sprintf("%s?%s", o.authEndpoint(), params.Encode())
 	return authURL, state, nil
 }
 
@@ -266,7 +296,7 @@ func (o *ClaudeAuth) ExchangeCodeForTokens(ctx context.Context, code, state stri
 
 	// log.Debugf("Token exchange request: %s", string(jsonBody))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", o.tokenEndpoint(false), strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create token request: %w", err)
 	}
@@ -372,7 +402,7 @@ func (o *ClaudeAuth) refreshTokensSingleFlight(ctx context.Context, refreshToken
 		return nil, fmt.Errorf("failed to marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", TokenURL, strings.NewReader(string(jsonBody)))
+	req, err := http.NewRequestWithContext(ctx, "POST", o.tokenEndpoint(true), strings.NewReader(string(jsonBody)))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create refresh request: %w", err)
 	}
@@ -440,10 +470,19 @@ func (o *ClaudeAuth) CreateTokenStorage(bundle *ClaudeAuthBundle) *ClaudeTokenSt
 		RefreshToken: bundle.TokenData.RefreshToken,
 		LastRefresh:  bundle.LastRefresh,
 		Email:        bundle.TokenData.Email,
+		BaseURL:      o.runtimeBaseURL(),
 		Expire:       bundle.TokenData.Expire,
 	}
 
 	return storage
+}
+
+func (o *ClaudeAuth) runtimeBaseURL() string {
+	if o == nil || o.cfg == nil {
+		return ""
+	}
+	override := o.cfg.GetOAuthEndpointOverride("claude")
+	return strings.TrimSpace(override.ApiBaseURL)
 }
 
 // RefreshTokensWithRetry refreshes tokens with automatic retry logic.

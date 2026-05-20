@@ -31,6 +31,19 @@ type SDKConfig struct {
 	// RequestLog enables or disables detailed request logging functionality.
 	RequestLog bool `yaml:"request-log" json:"request-log"`
 
+	// RequestLogSuccessBody controls whether 2xx AI API requests also include request/response bodies
+	// in the access log line. Default is false to avoid large noisy logs during normal operation.
+	RequestLogSuccessBody bool `yaml:"request-log-success-body" json:"request-log-success-body"`
+
+	// DetailedAPIErrorBodyLogLimit limits quoted request/response body content logged by detailed
+	// upstream API warn/error logs. Zero uses the default limit (4096), negative disables truncation.
+	DetailedAPIErrorBodyLogLimit int `yaml:"detailed-api-error-body-log-limit" json:"detailed-api-error-body-log-limit"`
+
+	// DetailedAPIErrorBodyLogFormat controls the warn/error log body format for upstream API failures.
+	// Empty or "full" keeps the current quoted full-body format (subject to DetailedAPIErrorBodyLogLimit).
+	// "summary" restores the previous summarized format using HTML title/JSON error extraction.
+	DetailedAPIErrorBodyLogFormat string `yaml:"detailed-api-error-body-log-format" json:"detailed-api-error-body-log-format"`
+
 	// APIKeys is a list of keys for authenticating clients to this proxy server.
 	APIKeys []string `yaml:"api-keys" json:"api-keys"`
 

@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 )
 
 // CodeBuddyTokenStorage stores OAuth token information for CodeBuddy API authentication.
@@ -30,6 +30,8 @@ type CodeBuddyTokenStorage struct {
 	Domain string `json:"domain"`
 	// UserID is the user ID associated with this token.
 	UserID string `json:"user_id"`
+	// Email is the email address associated with this token.
+	Email string `json:"email,omitempty"`
 	// Type indicates the authentication provider type, always "codebuddy" for this storage.
 	Type string `json:"type"`
 }
@@ -45,7 +47,9 @@ type CodeBuddyTokenStorage struct {
 //   - error: An error if the operation fails, nil otherwise
 func (s *CodeBuddyTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
-	s.Type = "codebuddy"
+	if s.Type == "" {
+		s.Type = "codebuddy"
+	}
 	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}

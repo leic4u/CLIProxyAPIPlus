@@ -15,7 +15,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -111,11 +111,13 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// Log upstream error responses for diagnostics (502, 503, etc.)
 		// These are NOT proxy connection errors - the upstream responded with an error status
-		method := ""
-		path := ""
+		method := "<unknown>"
+		path := "<unknown>"
 		if resp.Request != nil {
-			method = resp.Request.Method
-			if resp.Request.URL != nil {
+			if resp.Request.Method != "" {
+				method = resp.Request.Method
+			}
+			if resp.Request.URL != nil && resp.Request.URL.Path != "" {
 				path = resp.Request.URL.Path
 			}
 		}

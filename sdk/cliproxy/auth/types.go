@@ -7,12 +7,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	baseauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth"
+	baseauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth"
 )
 
 // PostAuthHook defines a function that is called after an Auth record is created
@@ -89,6 +90,13 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// PrimaryInfo tracks primary credential handoff state for providers that use
+	// a single-active-credential model (e.g. Antigravity). When non-nil, this
+	// credential participates in primary handoff: only the credential with
+	// IsPrimary=true is enabled for selection; the rest are disabled.
+	// Handoff is triggered on specific error status codes (401/403/429/502/503/504).
+	PrimaryInfo *PrimaryInfo `json:"primary_info,omitempty"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
@@ -148,6 +156,20 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PrimaryInfo tracks primary credential handoff state for providers that use
+// a single-active-credential model. When non-nil, this credential participates
+// in primary handoff: only the credential with IsPrimary=true is enabled for
+// selection; the rest are disabled. Handoff is triggered on specific error
+// status codes (401/403/429/502/503/504).
+type PrimaryInfo struct {
+	// IsPrimary indicates whether this credential is the current primary.
+	IsPrimary bool `json:"is_primary"`
+	// Order defines the handoff order among credentials for the same provider.
+	// Lower values are preferred. When primary fails, the next lowest order
+	// credential becomes primary (wrap-around to first if all exhausted).
+	Order int `json:"order"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -238,8 +260,30 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.ModelStates[key] = state.Clone()
 		}
 	}
+	if a.PrimaryInfo != nil {
+		copyAuth.PrimaryInfo = &PrimaryInfo{
+			IsPrimary: a.PrimaryInfo.IsPrimary,
+			Order:     a.PrimaryInfo.Order,
+		}
+	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+// SyncPrimaryInfoMetadata keeps persisted metadata aligned with the canonical
+// PrimaryInfo state for providers that serialize handoff information.
+func SyncPrimaryInfoMetadata(auth *Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	if auth.PrimaryInfo == nil {
+		delete(auth.Metadata, "primary_info")
+		return
+	}
+	auth.Metadata["primary_info"] = map[string]any{
+		"is_primary": auth.PrimaryInfo.IsPrimary,
+		"order":      auth.PrimaryInfo.Order,
+	}
 }
 
 func stableAuthIndex(seed string) string {
@@ -256,45 +300,65 @@ func (a *Auth) indexSeed() string {
 		return ""
 	}
 
-	if fileName := strings.TrimSpace(a.FileName); fileName != "" {
-		return "file:" + fileName
-	}
-
-	providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
+	provider := strings.ToLower(strings.TrimSpace(a.Provider))
 	compatName := ""
 	baseURL := ""
 	apiKey := ""
-	source := ""
+	filePath := ""
 	if a.Attributes != nil {
-		if value := strings.TrimSpace(a.Attributes["provider_key"]); value != "" {
-			providerKey = strings.ToLower(value)
-		}
-		compatName = strings.ToLower(strings.TrimSpace(a.Attributes["compat_name"]))
+		compatName = strings.TrimSpace(a.Attributes["compat_name"])
 		baseURL = strings.TrimSpace(a.Attributes["base_url"])
 		apiKey = strings.TrimSpace(a.Attributes["api_key"])
-		source = strings.TrimSpace(a.Attributes["source"])
+		filePath = strings.TrimSpace(a.Attributes["path"])
+		if filePath == "" {
+			filePath = strings.TrimSpace(a.Attributes["source"])
+		}
 	}
 
-	proxyURL := strings.TrimSpace(a.ProxyURL)
-	hasCredentialIdentity := compatName != "" || baseURL != "" || proxyURL != "" || apiKey != "" || source != ""
-	if providerKey != "" && hasCredentialIdentity {
-		parts := []string{"provider=" + providerKey}
-		if compatName != "" {
-			parts = append(parts, "compat="+compatName)
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.FileName)
+	}
+	if filePath == "" {
+		filePath = strings.TrimSpace(a.ID)
+	}
+
+	if filePath != "" && strings.HasSuffix(strings.ToLower(filePath), ".json") {
+		abs, errAbs := filepath.Abs(filePath)
+		if errAbs == nil && strings.TrimSpace(abs) != "" {
+			filePath = abs
 		}
-		if baseURL != "" {
-			parts = append(parts, "base="+baseURL)
+		filePath = filepath.Clean(filePath)
+
+		authType := ""
+		if a.Metadata != nil {
+			if rawType, ok := a.Metadata["type"].(string); ok {
+				authType = strings.TrimSpace(rawType)
+			}
 		}
-		if proxyURL != "" {
-			parts = append(parts, "proxy="+proxyURL)
+		if authType == "" {
+			authType = strings.TrimSpace(provider)
 		}
-		if apiKey != "" {
-			parts = append(parts, "api_key="+apiKey)
+		authType = strings.ToLower(strings.TrimSpace(authType))
+		if authType != "" {
+			return authType + ":" + filePath
 		}
-		if source != "" {
-			parts = append(parts, "source="+source)
+	}
+
+	apiPrefix := ""
+	if apiKey != "" {
+		switch {
+		case compatName != "" || strings.EqualFold(provider, "openai-compatibility"):
+			apiPrefix = "openai-compatibility"
+		case strings.EqualFold(provider, "gemini"):
+			apiPrefix = "gemini-api-key"
+		case strings.EqualFold(provider, "codex"):
+			apiPrefix = "codex-api-key"
+		case strings.EqualFold(provider, "claude"):
+			apiPrefix = "claude-api-key"
 		}
-		return "config:" + strings.Join(parts, "\x00")
+	}
+	if apiPrefix != "" {
+		return apiPrefix + ":" + strings.TrimSpace(baseURL) + "+" + strings.TrimSpace(apiKey)
 	}
 
 	if id := strings.TrimSpace(a.ID); id != "" {
@@ -355,19 +419,28 @@ func (a *Auth) ProxyInfo() string {
 	return "via proxy"
 }
 
-// DisableCoolingOverride returns the auth-file scoped disable_cooling override when present.
+// DisableCoolingOverride returns the auth scoped disable_cooling override when present.
 // The value is read from metadata key "disable_cooling" (or legacy "disable-cooling").
+//
+// NOTE: This override is intentionally "true-only". When the metadata value is false, it is treated
+// as "not set" so the global disable-cooling flag can still take effect.
 func (a *Auth) DisableCoolingOverride() (bool, bool) {
 	if a == nil || a.Metadata == nil {
 		return false, false
 	}
 	if val, ok := a.Metadata["disable_cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}
 	if val, ok := a.Metadata["disable-cooling"]; ok {
 		if parsed, okParse := parseBoolAny(val); okParse {
+			if !parsed {
+				return false, false
+			}
 			return parsed, true
 		}
 	}

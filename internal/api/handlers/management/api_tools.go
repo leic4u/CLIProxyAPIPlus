@@ -14,10 +14,10 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/runtime/geminicli"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/proxyutil"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
+	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/proxyutil"
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -481,6 +481,15 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		return "", fmt.Errorf("antigravity oauth token refresh returned empty access_token")
 	}
 
+	// Preserve tier info before refresh
+	var tierID, tierName string
+	var tierIsPaid bool
+	if auth.Metadata != nil {
+		tierID, _ = auth.Metadata["tier_id"].(string)
+		tierName, _ = auth.Metadata["tier_name"].(string)
+		tierIsPaid, _ = auth.Metadata["tier_is_paid"].(bool)
+	}
+
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -495,6 +504,17 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	}
 	auth.Metadata["type"] = "antigravity"
+
+	// Restore preserved tier info
+	if tierID != "" {
+		auth.Metadata["tier_id"] = tierID
+	}
+	if tierName != "" {
+		auth.Metadata["tier_name"] = tierName
+	}
+	if tierIsPaid {
+		auth.Metadata["tier_is_paid"] = tierIsPaid
+	}
 
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = now

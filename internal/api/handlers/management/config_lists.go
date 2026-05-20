@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/gin-gonic/gin"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 )
 
 // Generic helpers for list[string]
@@ -151,6 +151,7 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 		Prefix         *string            `json:"prefix"`
 		BaseURL        *string            `json:"base-url"`
 		ProxyURL       *string            `json:"proxy-url"`
+		BillingClass   *string            `json:"billing-class"`
 		Headers        *map[string]string `json:"headers"`
 		ExcludedModels *[]string          `json:"excluded-models"`
 	}
@@ -205,6 +206,9 @@ func (h *Handler) PatchGeminiKey(c *gin.Context) {
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.BillingClass != nil {
+		entry.BillingClass = config.BillingClass(normalizeBillingClassValue(*body.Value.BillingClass))
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
@@ -311,6 +315,7 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 		Prefix         *string               `json:"prefix"`
 		BaseURL        *string               `json:"base-url"`
 		ProxyURL       *string               `json:"proxy-url"`
+		BillingClass   *string               `json:"billing-class"`
 		Models         *[]config.ClaudeModel `json:"models"`
 		Headers        *map[string]string    `json:"headers"`
 		ExcludedModels *[]string             `json:"excluded-models"`
@@ -357,6 +362,9 @@ func (h *Handler) PatchClaudeKey(c *gin.Context) {
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.BillingClass != nil {
+		entry.BillingClass = config.BillingClass(normalizeBillingClassValue(*body.Value.BillingClass))
 	}
 	if body.Value.Models != nil {
 		entry.Models = append([]config.ClaudeModel(nil), (*body.Value.Models)...)
@@ -466,6 +474,7 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 		Prefix        *string                             `json:"prefix"`
 		Disabled      *bool                               `json:"disabled"`
 		BaseURL       *string                             `json:"base-url"`
+		BillingClass  *string                             `json:"billing-class"`
 		APIKeyEntries *[]config.OpenAICompatibilityAPIKey `json:"api-key-entries"`
 		Models        *[]config.OpenAICompatibilityModel  `json:"models"`
 		Headers       *map[string]string                  `json:"headers"`
@@ -519,6 +528,9 @@ func (h *Handler) PatchOpenAICompat(c *gin.Context) {
 			return
 		}
 		entry.BaseURL = trimmed
+	}
+	if body.Value.BillingClass != nil {
+		entry.BillingClass = config.BillingClass(normalizeBillingClassValue(*body.Value.BillingClass))
 	}
 	if body.Value.APIKeyEntries != nil {
 		entry.APIKeyEntries = append([]config.OpenAICompatibilityAPIKey(nil), (*body.Value.APIKeyEntries)...)
@@ -603,6 +615,7 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 		Prefix         *string                     `json:"prefix"`
 		BaseURL        *string                     `json:"base-url"`
 		ProxyURL       *string                     `json:"proxy-url"`
+		BillingClass   *string                     `json:"billing-class"`
 		Headers        *map[string]string          `json:"headers"`
 		Models         *[]config.VertexCompatModel `json:"models"`
 		ExcludedModels *[]string                   `json:"excluded-models"`
@@ -665,6 +678,9 @@ func (h *Handler) PatchVertexCompatKey(c *gin.Context) {
 	}
 	if body.Value.ProxyURL != nil {
 		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.BillingClass != nil {
+		entry.BillingClass = config.BillingClass(normalizeBillingClassValue(*body.Value.BillingClass))
 	}
 	if body.Value.Headers != nil {
 		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
@@ -842,7 +858,11 @@ func (h *Handler) PutOAuthModelAlias(c *gin.Context) {
 		entries = wrapper.Items
 	}
 	h.cfg.OAuthModelAlias = sanitizedOAuthModelAlias(entries)
-	h.persist(c)
+	if h.persist(c) {
+		if h.authManager != nil {
+			h.authManager.SetOAuthModelAlias(h.cfg.OAuthModelAlias)
+		}
+	}
 }
 
 func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
@@ -886,14 +906,22 @@ func (h *Handler) PatchOAuthModelAlias(c *gin.Context) {
 			h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 		}
 		h.cfg.OAuthModelAlias[channel] = []config.OAuthModelAlias{}
-		h.persist(c)
+		if h.persist(c) {
+			if h.authManager != nil {
+				h.authManager.SetOAuthModelAlias(h.cfg.OAuthModelAlias)
+			}
+		}
 		return
 	}
 	if h.cfg.OAuthModelAlias == nil {
 		h.cfg.OAuthModelAlias = make(map[string][]config.OAuthModelAlias)
 	}
 	h.cfg.OAuthModelAlias[channel] = normalized
-	h.persist(c)
+	if h.persist(c) {
+		if h.authManager != nil {
+			h.authManager.SetOAuthModelAlias(h.cfg.OAuthModelAlias)
+		}
+	}
 }
 
 func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
@@ -917,7 +945,11 @@ func (h *Handler) DeleteOAuthModelAlias(c *gin.Context) {
 	// marker survives config reload and prevents SanitizeOAuthModelAlias from
 	// re-injecting default aliases (fixes #222).
 	h.cfg.OAuthModelAlias[channel] = nil
-	h.persist(c)
+	if h.persist(c) {
+		if h.authManager != nil {
+			h.authManager.SetOAuthModelAlias(h.cfg.OAuthModelAlias)
+		}
+	}
 }
 
 // codex-api-key: []CodexKey
@@ -1085,12 +1117,149 @@ func (h *Handler) DeleteCodexKey(c *gin.Context) {
 	c.JSON(400, gin.H{"error": "missing api-key or index"})
 }
 
+// ollama-api-key: []OllamaKey
+func (h *Handler) GetOllamaKeys(c *gin.Context) {
+	c.JSON(200, gin.H{"ollama-api-key": h.ollamaKeysWithAuthIndex()})
+}
+
+func (h *Handler) PutOllamaKeys(c *gin.Context) {
+	data, err := c.GetRawData()
+	if err != nil {
+		c.JSON(400, gin.H{"error": "failed to read body"})
+		return
+	}
+	var arr []config.OllamaKey
+	if err = json.Unmarshal(data, &arr); err != nil {
+		var obj struct {
+			Items []config.OllamaKey `json:"items"`
+		}
+		if err2 := json.Unmarshal(data, &obj); err2 != nil || len(obj.Items) == 0 {
+			c.JSON(400, gin.H{"error": "invalid body"})
+			return
+		}
+		arr = obj.Items
+	}
+	filtered := make([]config.OllamaKey, 0, len(arr))
+	for i := range arr {
+		entry := arr[i]
+		normalizeOllamaKey(&entry)
+		if entry.APIKey == "" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cfg.OllamaKey = filtered
+	h.cfg.SanitizeOllamaKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) PatchOllamaKey(c *gin.Context) {
+	type ollamaKeyPatch struct {
+		APIKey         *string               `json:"api-key"`
+		Prefix         *string               `json:"prefix"`
+		BaseURL        *string               `json:"base-url"`
+		ProxyURL       *string               `json:"proxy-url"`
+		Models         *[]config.OllamaModel `json:"models"`
+		Headers        *map[string]string    `json:"headers"`
+		ExcludedModels *[]string             `json:"excluded-models"`
+	}
+	var body struct {
+		Index *int            `json:"index"`
+		Match *string         `json:"match"`
+		Value *ollamaKeyPatch `json:"value"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.Value == nil {
+		c.JSON(400, gin.H{"error": "invalid body"})
+		return
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	targetIndex := -1
+	if body.Index != nil && *body.Index >= 0 && *body.Index < len(h.cfg.OllamaKey) {
+		targetIndex = *body.Index
+	}
+	if targetIndex == -1 && body.Match != nil {
+		match := strings.TrimSpace(*body.Match)
+		for i := range h.cfg.OllamaKey {
+			if h.cfg.OllamaKey[i].APIKey == match {
+				targetIndex = i
+				break
+			}
+		}
+	}
+	if targetIndex == -1 {
+		c.JSON(404, gin.H{"error": "item not found"})
+		return
+	}
+
+	entry := h.cfg.OllamaKey[targetIndex]
+	if body.Value.APIKey != nil {
+		entry.APIKey = strings.TrimSpace(*body.Value.APIKey)
+	}
+	if body.Value.Prefix != nil {
+		entry.Prefix = strings.TrimSpace(*body.Value.Prefix)
+	}
+	if body.Value.BaseURL != nil {
+		entry.BaseURL = strings.TrimSpace(*body.Value.BaseURL)
+	}
+	if body.Value.ProxyURL != nil {
+		entry.ProxyURL = strings.TrimSpace(*body.Value.ProxyURL)
+	}
+	if body.Value.Models != nil {
+		entry.Models = append([]config.OllamaModel(nil), (*body.Value.Models)...)
+	}
+	if body.Value.Headers != nil {
+		entry.Headers = config.NormalizeHeaders(*body.Value.Headers)
+	}
+	if body.Value.ExcludedModels != nil {
+		entry.ExcludedModels = config.NormalizeExcludedModels(*body.Value.ExcludedModels)
+	}
+	normalizeOllamaKey(&entry)
+	h.cfg.OllamaKey[targetIndex] = entry
+	h.cfg.SanitizeOllamaKeys()
+	h.persistLocked(c)
+}
+
+func (h *Handler) DeleteOllamaKey(c *gin.Context) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if val := strings.TrimSpace(c.Query("api-key")); val != "" {
+		base := strings.TrimSpace(c.Query("base-url"))
+		out := make([]config.OllamaKey, 0, len(h.cfg.OllamaKey))
+		for _, v := range h.cfg.OllamaKey {
+			if strings.TrimSpace(v.APIKey) == val && strings.TrimSpace(v.BaseURL) == base {
+				continue
+			}
+			out = append(out, v)
+		}
+		h.cfg.OllamaKey = out
+		h.cfg.SanitizeOllamaKeys()
+		h.persistLocked(c)
+		return
+	}
+	if idxStr := c.Query("index"); idxStr != "" {
+		var idx int
+		_, err := fmt.Sscanf(idxStr, "%d", &idx)
+		if err == nil && idx >= 0 && idx < len(h.cfg.OllamaKey) {
+			h.cfg.OllamaKey = append(h.cfg.OllamaKey[:idx], h.cfg.OllamaKey[idx+1:]...)
+			h.cfg.SanitizeOllamaKeys()
+			h.persistLocked(c)
+			return
+		}
+	}
+	c.JSON(400, gin.H{"error": "missing api-key or index"})
+}
+
 func normalizeOpenAICompatibilityEntry(entry *config.OpenAICompatibility) {
 	if entry == nil {
 		return
 	}
 	// Trim base-url; empty base-url indicates provider should be removed by sanitization
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.BillingClass = config.BillingClass(normalizeBillingClassValue(string(entry.BillingClass)))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	existing := make(map[string]struct{}, len(entry.APIKeyEntries))
 	for i := range entry.APIKeyEntries {
@@ -1125,6 +1294,7 @@ func normalizeClaudeKey(entry *config.ClaudeKey) {
 	entry.APIKey = strings.TrimSpace(entry.APIKey)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.BillingClass = config.BillingClass(normalizeBillingClassValue(string(entry.BillingClass)))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {
@@ -1151,12 +1321,40 @@ func normalizeCodexKey(entry *config.CodexKey) {
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.BillingClass = config.BillingClass(normalizeBillingClassValue(string(entry.BillingClass)))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {
 		return
 	}
 	normalized := make([]config.CodexModel, 0, len(entry.Models))
+	for i := range entry.Models {
+		model := entry.Models[i]
+		model.Name = strings.TrimSpace(model.Name)
+		model.Alias = strings.TrimSpace(model.Alias)
+		if model.Name == "" && model.Alias == "" {
+			continue
+		}
+		normalized = append(normalized, model)
+	}
+	entry.Models = normalized
+}
+
+func normalizeOllamaKey(entry *config.OllamaKey) {
+	if entry == nil {
+		return
+	}
+	entry.APIKey = strings.TrimSpace(entry.APIKey)
+	entry.Prefix = strings.TrimSpace(entry.Prefix)
+	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
+	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.BillingClass = config.BillingClass(normalizeBillingClassValue(string(entry.BillingClass)))
+	entry.Headers = config.NormalizeHeaders(entry.Headers)
+	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
+	if len(entry.Models) == 0 {
+		return
+	}
+	normalized := make([]config.OllamaModel, 0, len(entry.Models))
 	for i := range entry.Models {
 		model := entry.Models[i]
 		model.Name = strings.TrimSpace(model.Name)
@@ -1177,6 +1375,7 @@ func normalizeVertexCompatKey(entry *config.VertexCompatKey) {
 	entry.Prefix = strings.TrimSpace(entry.Prefix)
 	entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 	entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
+	entry.BillingClass = config.BillingClass(normalizeBillingClassValue(string(entry.BillingClass)))
 	entry.Headers = config.NormalizeHeaders(entry.Headers)
 	entry.ExcludedModels = config.NormalizeExcludedModels(entry.ExcludedModels)
 	if len(entry.Models) == 0 {

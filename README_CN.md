@@ -1,8 +1,20 @@
-# CLIProxyAPI Plus
+# CLI 代理 API
 
-[English](README.md) | 中文
+[English](README.md) | 中文 | [日本語](README_JA.md)
 
-这是 [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 的 Plus 版本，在原有基础上增加了第三方供应商的支持。
+一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
+
+## Fork 特有功能
+
+此 fork 在上游 [jc01rho/CLIProxyAPIPlus](https://github.com/jc01rho/CLIProxyAPIPlus) 基础上添加了以下增强功能：
+
+- **Kiro CLI 原生 OAuth**：`--kiro-cli-login` 标志用于原生 Kiro CLI OAuth 流程，具有正确的指纹识别和遥测功能
+- **Kiro 改进**：令牌估算回退、tool_use.id 验证、OAuth 别名热重载、详细的 400 错误日志
+- **CodeBuddy 国际版支持**：`--codebuddy-intl-login` 标志用于 `www.codebuddy.ai` 端点（与国内端点分离）
+- **CodeBuddy 请求头修复**：添加了缺失的必需请求头（`x-request-id`、`x-github-api-version`）以确保 API 兼容性
+- **CodeBuddy 图像生成**：V2 端点转换和图像生成路由支持
+- **Cline OAuth 支持**：`--cline-login` 处理器，支持令牌刷新和 OpenRouter 兼容请求头
+- **公共安装脚本**：使用 GitHub releases 的跨平台安装器（无需编译 Go）
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
@@ -42,19 +54,21 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 ## 功能特性
 
-- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex 兼容的 API 端点
+- 为 CLI 模型提供 OpenAI/Gemini/Claude/Codex/Grok 兼容的 API 端点
 - 新增 OpenAI Codex（GPT 系列）支持（OAuth 登录）
 - 新增 Claude Code 支持（OAuth 登录）
+- 新增 Grok Build 支持（OAuth 登录）
 - 支持流式、非流式响应，以及受支持场景下的 WebSocket 响应
 - 函数调用/工具支持
 - 多模态输入（文本、图片）
-- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude）
-- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude）
+- 多账户支持与轮询负载均衡（Gemini、OpenAI、Claude、Grok）
+- 简单的 CLI 身份验证流程（Gemini、OpenAI、Claude、Grok）
 - 支持 Gemini AIStudio API 密钥
 - 支持 AI Studio Build 多账户轮询
 - 支持 Gemini CLI 多账户轮询
 - 支持 Claude Code 多账户轮询
 - 支持 OpenAI Codex 多账户轮询
+- 支持 Grok Build 多账户轮询
 - 通过配置接入上游 OpenAI 兼容提供商（例如 OpenRouter）
 - 可复用的 Go SDK（见 `docs/sdk-usage_CN.md`）
 
@@ -143,7 +157,7 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 
 ## 贡献
 
-该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
+欢迎贡献！请随时提交 Pull Request。
 
 1. Fork 仓库
 2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
@@ -254,3 +268,11 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 ## 许可证
 
 此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
+
+## 写给所有中国网友的
+
+QQ 群：188637136（满）、1081218164
+
+或
+
+Telegram 群：https://t.me/CLIProxyAPI

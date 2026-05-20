@@ -21,16 +21,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	kiroauth "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	kiroclaude "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/claude"
-	kirocommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/common"
-	kiroopenai "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/kiro/openai"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/executor"
-	"github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/usage"
-	sdktranslator "github.com/router-for-me/CLIProxyAPI/v6/sdk/translator"
+	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
+	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
+	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
+	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -371,8 +372,9 @@ func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 		},
 		{
 			// Fallback: CodeWhisperer endpoint (legacy, only works in us-east-1)
+			// Keep AI_EDITOR semantics even for kiro-cli auth; sentinel value is normalized by translator.
 			URL:       fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", region),
-			Origin:    "AI_EDITOR",
+			Origin:    "KIRO_AI_EDITOR",
 			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			Name:      "CodeWhisperer",
 		},
@@ -495,21 +497,59 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 func (e *KiroExecutor) Identifier() string { return "kiro" }
 
 // applyDynamicFingerprint applies account-specific fingerprint headers to the request.
+func isKiroCLIAuth(auth *cliproxyauth.Auth) bool {
+	if auth == nil {
+		return false
+	}
+	if auth.Metadata != nil {
+		if method, ok := auth.Metadata["auth_method"].(string); ok && kiroauth.IsKiroCLIAuthMethod(method) {
+			return true
+		}
+	}
+	if auth.Attributes != nil {
+		if method := auth.Attributes["auth_method"]; kiroauth.IsKiroCLIAuthMethod(method) {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveRequestOrigin(auth *cliproxyauth.Auth, fallback string) string {
+	if isKiroCLIAuth(auth) {
+		if strings.EqualFold(strings.TrimSpace(fallback), kiroauth.KiroOriginAIEditor) {
+			return kiroauth.KiroOriginCLI
+		}
+		return fallback
+	}
+	if fallback != "" {
+		return fallback
+	}
+	return kiroauth.KiroOriginAIEditor
+}
+
 func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 	accountKey := getAccountKey(auth)
 	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
+	kiroCLI := isKiroCLIAuth(auth)
 
-	req.Header.Set("User-Agent", fp.BuildUserAgent())
-	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	if kiroCLI {
+		req.Header.Set("User-Agent", fp.BuildRustStreamingUserAgent())
+		req.Header.Set("X-Amz-User-Agent", fp.BuildRustStreamingAmzUserAgent())
+		req.Header.Del("x-amzn-kiro-agent-mode")
+		req.Header.Set("x-amzn-codewhisperer-optout", "false")
+	} else {
+		req.Header.Set("User-Agent", fp.BuildUserAgent())
+		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
+		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	}
 
 	keyPrefix := accountKey
 	if len(keyPrefix) > 8 {
 		keyPrefix = keyPrefix[:8]
 	}
-	log.Debugf("kiro: using dynamic fingerprint for account %s (SDK:%s, OS:%s/%s, Kiro:%s)",
-		keyPrefix+"...", fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
+	log.Debugf("kiro: using dynamic fingerprint for account %s (cli=%v, SDK:%s, OS:%s/%s, Kiro:%s)",
+		keyPrefix+"...", kiroCLI, fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 }
 
 // PrepareRequest prepares the HTTP request before execution.
@@ -705,7 +745,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin = endpointConfig.Origin
+		currentOrigin = resolveRequestOrigin(auth, endpointConfig.Origin)
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
@@ -732,10 +772,6 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if endpointConfig.AmzTarget != "" {
 				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 			}
-			// Kiro-specific headers
-			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
-			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
-
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
 
@@ -862,7 +898,6 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				log.Warnf("kiro: received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
 					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
@@ -930,7 +965,6 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
 					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 					if refreshErr != nil {
-						log.Errorf("kiro: token refresh failed: %v", refreshErr)
 						// Token refresh failed - return error immediately
 						return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 					}
@@ -1147,7 +1181,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin = endpointConfig.Origin
+		currentOrigin = resolveRequestOrigin(auth, endpointConfig.Origin)
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
@@ -1175,10 +1209,6 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if endpointConfig.AmzTarget != "" {
 				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 			}
-			// Kiro-specific headers
-			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
-			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
-
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
 
@@ -1304,7 +1334,6 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				log.Warnf("kiro: stream received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 				if refreshErr != nil {
-					log.Errorf("kiro: token refresh failed: %v", refreshErr)
 					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
@@ -1372,7 +1401,6 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
 					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 					if refreshErr != nil {
-						log.Errorf("kiro: token refresh failed: %v", refreshErr)
 						// Token refresh failed - return error immediately
 						return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 					}
@@ -1661,72 +1689,117 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 	return profileArn
 }
 
+var defaultKiroModelMap = map[string]string{
+	// Amazon Q format (amazonq- prefix) - same API as Kiro
+	"amazonq-auto":                       "auto",
+	"amazonq-claude-opus-4-6":            "claude-opus-4.6",
+	"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
+	"amazonq-claude-opus-4-5":            "claude-opus-4.5",
+	"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
+	"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+	"amazonq-claude-sonnet-4":            "claude-sonnet-4",
+	"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
+	"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
+	// Kiro format (kiro- prefix) - valid model names that should be preserved
+	"kiro-claude-opus-4-6":            "claude-opus-4.6",
+	"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
+	"kiro-claude-opus-4-5":            "claude-opus-4.5",
+	"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
+	"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+	"kiro-claude-sonnet-4":            "claude-sonnet-4",
+	"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
+	"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
+	"kiro-deepseek-3-2":               "deepseek-3.2",
+	"kiro-minimax-m2-5":               "minimax-m2.5",
+	"kiro-minimax-m2-1":               "minimax-m2.1",
+	"kiro-glm-5":                      "glm-5",
+	"kiro-qwen3-coder-next":           "qwen3-coder-next",
+	"kiro-auto":                       "auto",
+	// Native format (no prefix) - used by Kiro IDE directly
+	"claude-opus-4-6":            "claude-opus-4.6",
+	"claude-opus-4.6":            "claude-opus-4.6",
+	"claude-sonnet-4-6":          "claude-sonnet-4.6",
+	"claude-sonnet-4.6":          "claude-sonnet-4.6",
+	"claude-opus-4-5":            "claude-opus-4.5",
+	"claude-opus-4.5":            "claude-opus-4.5",
+	"claude-haiku-4-5":           "claude-haiku-4.5",
+	"claude-haiku-4.5":           "claude-haiku-4.5",
+	"claude-sonnet-4-5":          "claude-sonnet-4.5",
+	"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
+	"claude-sonnet-4.5":          "claude-sonnet-4.5",
+	"claude-sonnet-4":            "claude-sonnet-4",
+	"claude-sonnet-4-20250514":   "claude-sonnet-4",
+	"deepseek-3-2":               "deepseek-3.2",
+	"minimax-m2-5":               "minimax-m2.5",
+	"minimax-m2-1":               "minimax-m2.1",
+	"glm-5":                      "glm-5",
+	"qwen3-coder-next":           "qwen3-coder-next",
+	"auto":                       "auto",
+}
+
 // mapModelToKiro maps external model names to Kiro model IDs.
 // Supports both Kiro and Amazon Q prefixes since they use the same API.
 // Agentic variants (-agentic suffix) map to the same backend model IDs.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
-	modelMap := map[string]string{
-		// Amazon Q format (amazonq- prefix) - same API as Kiro
-		"amazonq-auto":                       "auto",
-		"amazonq-claude-opus-4-7":            "claude-opus-4.7",
-		"amazonq-claude-opus-4-6":            "claude-opus-4.6",
-		"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"amazonq-claude-opus-4-5":            "claude-opus-4.5",
-		"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"amazonq-claude-sonnet-4":            "claude-sonnet-4",
-		"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
-		// Kiro format (kiro- prefix) - valid model names that should be preserved
-		"kiro-claude-opus-4-7":            "claude-opus-4.7",
-		"kiro-claude-opus-4-6":            "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5":            "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4":            "claude-sonnet-4",
-		"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
-		"kiro-auto":                       "auto",
-		// Native format (no prefix) - used by Kiro IDE directly
-		"claude-opus-4-7":            "claude-opus-4.7",
-		"claude-opus-4.7":            "claude-opus-4.7",
-		"claude-opus-4-6":            "claude-opus-4.6",
-		"claude-opus-4.6":            "claude-opus-4.6",
-		"claude-sonnet-4-6":          "claude-sonnet-4.6",
-		"claude-sonnet-4.6":          "claude-sonnet-4.6",
-		"claude-opus-4-5":            "claude-opus-4.5",
-		"claude-opus-4.5":            "claude-opus-4.5",
-		"claude-haiku-4-5":           "claude-haiku-4.5",
-		"claude-haiku-4.5":           "claude-haiku-4.5",
-		"claude-sonnet-4-5":          "claude-sonnet-4.5",
-		"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-		"claude-sonnet-4.5":          "claude-sonnet-4.5",
-		"claude-sonnet-4":            "claude-sonnet-4",
-		"claude-sonnet-4-20250514":   "claude-sonnet-4",
-		"auto":                       "auto",
-		// Agentic variants (same backend model IDs, but with special system prompt)
-		"claude-opus-4.7-agentic":        "claude-opus-4.7",
-		"claude-opus-4.6-agentic":        "claude-opus-4.6",
-		"claude-sonnet-4.6-agentic":      "claude-sonnet-4.6",
-		"claude-opus-4.5-agentic":        "claude-opus-4.5",
-		"claude-sonnet-4.5-agentic":      "claude-sonnet-4.5",
-		"claude-sonnet-4-agentic":        "claude-sonnet-4",
-		"claude-haiku-4.5-agentic":       "claude-haiku-4.5",
-		"kiro-claude-opus-4-7-agentic":   "claude-opus-4.7",
-		"kiro-claude-opus-4-6-agentic":   "claude-opus-4.6",
-		"kiro-claude-sonnet-4-6-agentic": "claude-sonnet-4.6",
-		"kiro-claude-opus-4-5-agentic":   "claude-opus-4.5",
-		"kiro-claude-sonnet-4-5-agentic": "claude-sonnet-4.5",
-		"kiro-claude-sonnet-4-agentic":   "claude-sonnet-4",
-		"kiro-claude-haiku-4-5-agentic":  "claude-haiku-4.5",
+	model = strings.TrimSpace(model)
+
+	// Handle agentic and chat variants dynamically
+	baseModel := model
+	if strings.HasSuffix(model, "-agentic") {
+		baseModel = strings.TrimSuffix(model, "-agentic")
+	} else if strings.HasSuffix(model, "-chat") {
+		baseModel = strings.TrimSuffix(model, "-chat")
 	}
-	if kiroID, ok := modelMap[model]; ok {
+
+	if kiroID, ok := defaultKiroModelMap[baseModel]; ok {
 		return kiroID
 	}
 
-	// Smart fallback: try to infer model type from name patterns
+	if strings.HasPrefix(model, "kiro-") {
+		if modelInfo := registry.LookupModelInfo(model, "kiro"); modelInfo != nil {
+			// Prefer explicit execution target from registry when present. This preserves
+			// fully-qualified upstream model IDs such as 'kiro-glm-5' that the Kiro API may expect.
+			if modelInfo.ExecutionTarget != "" {
+				log.Debugf("kiro: using registry execution target '%s' for model '%s'", modelInfo.ExecutionTarget, model)
+				return modelInfo.ExecutionTarget
+			}
+			// Fall back to registry ID only when it already looks like a backend ID
+			// (i.e. not a user-facing kiro-/amazonq- alias).
+			if modelInfo.ID != "" &&
+				!strings.HasPrefix(modelInfo.ID, "kiro-") &&
+				!strings.HasPrefix(modelInfo.ID, "amazonq-") {
+				log.Debugf("kiro: using registry ID '%s' for model '%s'", modelInfo.ID, model)
+				return modelInfo.ID
+			}
+			// If registry entry exists but no explicit target, infer backend format conservatively
+			if backendID := kiroBackendModelID(baseModel); backendID != "" {
+				log.Debugf("kiro: mapped registry model '%s' to backend ID '%s'", model, backendID)
+				return backendID
+			}
+		}
+
+		// No registry entry: infer backend format from the user-facing kiro-* alias.
+		if backendID := kiroBackendModelID(baseModel); backendID != "" {
+			log.Debugf("kiro: inferred backend ID '%s' for model '%s'", backendID, model)
+			return backendID
+		}
+		log.Debugf("kiro: passing model through unchanged for '%s'", model)
+		return model
+	}
+
+	// If a backend model ID is already provided directly (e.g. "glm-5"),
+	// forward it as-is instead of forcing a Claude fallback.
 	modelLower := strings.ToLower(model)
+	if !strings.HasPrefix(model, "amazonq-") &&
+		!strings.HasPrefix(model, "kiro-") &&
+		!strings.Contains(modelLower, "claude") &&
+		!strings.Contains(modelLower, "sonnet") &&
+		!strings.Contains(modelLower, "haiku") &&
+		!strings.Contains(modelLower, "opus") {
+		return model
+	}
+
+	// Smart fallback: try to infer model type from name patterns
 
 	// Check for Haiku variants
 	if strings.Contains(modelLower, "haiku") {
@@ -1768,9 +1841,48 @@ func (e *KiroExecutor) mapModelToKiro(model string) string {
 		return "claude-opus-4.5"
 	}
 
+	// Qwen models (Aliyun) - map to Kiro-compatible model IDs
+	if strings.Contains(modelLower, "qwen") {
+		// Qwen 3.6-plus and similar models
+		if strings.Contains(modelLower, "3.6") || strings.Contains(modelLower, "36") {
+			log.Debugf("kiro: Qwen 3.6 model '%s', mapping to qwen3.6-plus", model)
+			return model // Return as-is for Qwen models
+		}
+		// Other Qwen models
+		log.Debugf("kiro: Qwen model '%s', mapping to qwen-plus", model)
+		return model
+	}
+
 	// Final fallback to Sonnet 4.5 (most commonly used model)
 	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
 	return "claude-sonnet-4.5"
+}
+
+func kiroBackendModelID(model string) string {
+	backendID := strings.TrimSpace(model)
+	if backendID == "" {
+		return ""
+	}
+	backendID = strings.TrimPrefix(backendID, "kiro-")
+	backendID = strings.TrimSuffix(backendID, "-agentic")
+	if backendID == "" {
+		return ""
+	}
+
+	var b strings.Builder
+	b.Grow(len(backendID))
+	for i := 0; i < len(backendID); i++ {
+		if backendID[i] == '-' && i > 0 && i < len(backendID)-1 {
+			prev := backendID[i-1]
+			next := backendID[i+1]
+			if prev >= '0' && prev <= '9' && next >= '0' && next <= '9' {
+				b.WriteByte('.')
+				continue
+			}
+		}
+		b.WriteByte(backendID[i])
+	}
+	return b.String()
 }
 
 // EventStreamError represents an Event Stream processing error
@@ -3730,6 +3842,11 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		// Builder ID refresh with default endpoint
 		log.Debugf("kiro executor: using SSO OIDC refresh for AWS Builder ID")
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
+	case kiroauth.IsKiroCLIAuthMethod(authMethod):
+		// Native kiro-cli OAuth refresh path with Kiro-CLI User-Agent
+		log.Debugf("kiro executor: using native Kiro CLI refresh endpoint")
+		oauth := kiroauth.NewKiroCLIOAuth(e.cfg)
+		tokenData, err = oauth.RefreshToken(ctx, refreshToken)
 	default:
 		// Fallback to Kiro's OAuth refresh endpoint (for social auth: Google/GitHub)
 		log.Debugf("kiro executor: using Kiro OAuth refresh endpoint")
@@ -3756,7 +3873,9 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if tokenData.ProfileArn != "" {
 		updated.Metadata["profile_arn"] = tokenData.ProfileArn
 	}
-	if tokenData.AuthMethod != "" {
+	if existingMethod, ok := updated.Metadata["auth_method"].(string); ok && kiroauth.IsKiroCLIAuthMethod(existingMethod) {
+		updated.Metadata["auth_method"] = "kiro-cli"
+	} else if tokenData.AuthMethod != "" {
 		updated.Metadata["auth_method"] = tokenData.AuthMethod
 	}
 	if tokenData.Provider != "" {
@@ -4184,8 +4303,13 @@ func (h *webSearchHandler) setMcpHeaders(req *http.Request) {
 	req.Header.Set("Accept", "*/*")
 
 	// 2. Kiro-specific headers (aligned with GAR)
-	req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-	req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	if isKiroCLIAuth(h.auth) {
+		req.Header.Del("x-amzn-kiro-agent-mode")
+		req.Header.Set("x-amzn-codewhisperer-optout", "false")
+	} else {
+		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+		req.Header.Set("x-amzn-codewhisperer-optout", "true")
+	}
 
 	// 3. User-Agent: Reuse applyDynamicFingerprint for consistency
 	applyDynamicFingerprint(req, h.auth)

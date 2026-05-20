@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"os"
 
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor/proto"
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 )
 
 func main() {
@@ -15,8 +15,6 @@ func main() {
 	fmt.Printf("Result length: %d bytes\n", len(resultBytes))
 
 	// Write to file for analysis
-	if err := os.WriteFile("mcp_result.bin", resultBytes, 0o600); err != nil {
-		panic(err)
-	}
+	_ = os.WriteFile("mcp_result.bin", resultBytes, 0o644)
 	fmt.Println("Wrote mcp_result.bin")
 }

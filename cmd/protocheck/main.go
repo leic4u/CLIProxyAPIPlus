@@ -3,7 +3,7 @@ package main
 import (
 	"fmt"
 
-	cursorproto "github.com/router-for-me/CLIProxyAPI/v6/internal/auth/cursor/proto"
+	cursorproto "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/cursor/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 )
@@ -16,7 +16,7 @@ func main() {
 		"mcp_result", "mcpResult", "McpResult", "MCP_RESULT",
 		"shell_result", "shellResult",
 	}
-
+	
 	for _, name := range names {
 		fd := ecm.Descriptor().Fields().ByName(protoreflect.Name(name))
 		if fd != nil {
@@ -25,7 +25,7 @@ func main() {
 			fmt.Printf("Field %q NOT FOUND\n", name)
 		}
 	}
-
+	
 	// List all fields
 	fmt.Println("\nAll fields in ExecClientMessage:")
 	for i := 0; i < ecm.Descriptor().Fields().Len(); i++ {

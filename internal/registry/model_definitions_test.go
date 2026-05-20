@@ -33,36 +33,55 @@ func TestCodexStaticModelsIncludeGPT55(t *testing.T) {
 	assertGPT55ModelInfo(t, "lookup", model)
 }
 
-func TestKiroStaticModelsIncludeClaudeOpus47Variants(t *testing.T) {
-	tests := []struct {
-		id          string
-		displayName string
-	}{
-		{
-			id:          "kiro-claude-opus-4-7",
-			displayName: "Kiro Claude Opus 4.7",
-		},
-		{
-			id:          "kiro-claude-opus-4-7-agentic",
-			displayName: "Kiro Claude Opus 4.7 (Agentic)",
-		},
+func TestWithXAIBuiltinsAddsVideoModel(t *testing.T) {
+	models := WithXAIBuiltins(nil)
+	found := false
+	for _, model := range models {
+		if model != nil && model.ID == xaiBuiltinVideoModelID {
+			found = true
+			if model.OwnedBy != "xai" {
+				t.Fatalf("OwnedBy = %q, want xai", model.OwnedBy)
+			}
+		}
 	}
+	if !found {
+		t.Fatalf("expected %s builtin model", xaiBuiltinVideoModelID)
+	}
+}
 
-	kiroModels := GetKiroModels()
-	for _, tt := range tests {
-		t.Run(tt.id, func(t *testing.T) {
-			model := findModelInfo(kiroModels, tt.id)
-			if model == nil {
-				t.Fatalf("expected GetKiroModels to include %q", tt.id)
-			}
-			if model.DisplayName != tt.displayName {
-				t.Fatalf("display name mismatch for %q: got %q, want %q", tt.id, model.DisplayName, tt.displayName)
-			}
-			lookup := LookupStaticModelInfo(tt.id)
-			if lookup == nil {
-				t.Fatalf("expected LookupStaticModelInfo to find %q", tt.id)
-			}
-		})
+func TestValidateModelsCatalogAllowsMissingSections(t *testing.T) {
+	data := validTestModelsCatalog()
+	data.XAI = nil
+
+	if err := validateModelsCatalog(data); err != nil {
+		t.Fatalf("validateModelsCatalog() error = %v", err)
+	}
+}
+
+func TestValidateModelsCatalogRejectsInvalidDefinitions(t *testing.T) {
+	data := validTestModelsCatalog()
+	data.Claude = []*ModelInfo{{ID: ""}}
+
+	if err := validateModelsCatalog(data); err == nil {
+		t.Fatal("expected invalid model definition error")
+	}
+}
+
+func validTestModelsCatalog() *staticModelsJSON {
+	models := []*ModelInfo{{ID: "test-model"}}
+	return &staticModelsJSON{
+		Claude:      models,
+		Gemini:      models,
+		Vertex:      models,
+		GeminiCLI:   models,
+		AIStudio:    models,
+		CodexFree:   models,
+		CodexTeam:   models,
+		CodexPlus:   models,
+		CodexPro:    models,
+		Kimi:        models,
+		Antigravity: models,
+		XAI:         models,
 	}
 }
 

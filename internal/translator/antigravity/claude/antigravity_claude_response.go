@@ -10,14 +10,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cache"
-	translatorcommon "github.com/router-for-me/CLIProxyAPI/v6/internal/translator/common"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
+	translatorcommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/common"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	log "github.com/sirupsen/logrus"
 
 	"github.com/tidwall/gjson"
@@ -72,6 +73,11 @@ type Params struct {
 
 	// Signature caching support
 	CurrentThinkingText strings.Builder // Accumulates thinking text for signature caching
+
+	// Web search support
+	WebSearchQuery   string
+	WebSearchResults []map[string]any
+	WebSearchEmitted bool
 
 	// Reverse map: sanitized Gemini function name → original Claude tool name.
 	// Populated lazily on the first response chunk from the original request JSON.
@@ -308,6 +314,15 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 		params.FinishReason = finishReasonResult.String()
 	}
 
+	if q, results := extractWebSearchFromAntigravity(rawJSON); q != "" || len(results) > 0 {
+		if q != "" {
+			params.WebSearchQuery = q
+		}
+		if len(results) > 0 {
+			params.WebSearchResults = results
+		}
+	}
+
 	if usageResult := gjson.GetBytes(rawJSON, "response.usageMetadata"); usageResult.Exists() {
 		params.HasUsageMetadata = true
 		params.CachedTokenCount = usageResult.Get("cachedContentTokenCount").Int()
@@ -324,6 +339,7 @@ func ConvertAntigravityResponseToClaude(_ context.Context, _ string, originalReq
 	}
 
 	if params.HasUsageMetadata && params.HasFinishReason {
+		appendWebSearchBlocks(params, &output)
 		appendFinalEvents(params, &output, false)
 	}
 
@@ -385,6 +401,106 @@ func resolveStopReason(params *Params) string {
 	}
 
 	return "end_turn"
+}
+
+func buildEncryptedContent(url, title string) string {
+	payload := map[string]string{"url": url, "title": title}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(encoded)
+}
+
+func extractWebSearchFromAntigravity(rawJSON []byte) (string, []map[string]any) {
+	candidate := gjson.GetBytes(rawJSON, "response.candidates.0")
+	if !candidate.Exists() {
+		candidate = gjson.GetBytes(rawJSON, "candidates.0")
+	}
+	if !candidate.Exists() {
+		return "", nil
+	}
+
+	query := candidate.Get("groundingMetadata.webSearchQueries.0").String()
+
+	chunks := candidate.Get("groundingChunks")
+	if !chunks.Exists() {
+		chunks = candidate.Get("groundingMetadata.groundingChunks")
+	}
+	if !chunks.Exists() || !chunks.IsArray() {
+		return query, nil
+	}
+
+	results := make([]map[string]any, 0, len(chunks.Array()))
+	for _, chunk := range chunks.Array() {
+		web := chunk.Get("web")
+		if !web.Exists() {
+			continue
+		}
+		url := web.Get("uri").String()
+		if url == "" {
+			url = web.Get("url").String()
+		}
+		title := web.Get("title").String()
+		if title == "" {
+			title = web.Get("domain").String()
+		}
+		if url == "" && title == "" {
+			continue
+		}
+		item := map[string]any{
+			"type":              "web_search_result",
+			"title":             title,
+			"url":               url,
+			"encrypted_content": buildEncryptedContent(url, title),
+			"page_age":          nil,
+		}
+		results = append(results, item)
+	}
+
+	if len(results) == 0 {
+		return query, nil
+	}
+	return query, results
+}
+
+func appendWebSearchBlocks(params *Params, output *[]byte) {
+	if params.WebSearchEmitted {
+		return
+	}
+	if params.WebSearchQuery == "" && len(params.WebSearchResults) == 0 {
+		return
+	}
+
+	if params.ResponseType != 0 {
+		*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
+		params.ResponseType = 0
+		params.ResponseIndex++
+	}
+
+	toolUseID := fmt.Sprintf("srvtoolu_%d_%d", time.Now().UnixNano(), atomic.AddUint64(&toolUseIDCounter, 1))
+	serverTool := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"server_tool_use","id":"","name":"web_search","input":{}}}`, params.ResponseIndex)
+	serverTool, _ = sjson.Set(serverTool, "content_block.id", toolUseID)
+	if params.WebSearchQuery != "" {
+		serverTool, _ = sjson.Set(serverTool, "content_block.input.query", params.WebSearchQuery)
+	}
+	*output = translatorcommon.AppendSSEEventString(*output, "content_block_start", serverTool, 3)
+	*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
+	params.ResponseIndex++
+
+	resultBlock := fmt.Sprintf(`{"type":"content_block_start","index":%d,"content_block":{"type":"web_search_tool_result","tool_use_id":"","content":[]}}`, params.ResponseIndex)
+	resultBlock, _ = sjson.Set(resultBlock, "content_block.tool_use_id", toolUseID)
+	if len(params.WebSearchResults) > 0 {
+		if raw, err := json.Marshal(params.WebSearchResults); err == nil {
+			resultBlock, _ = sjson.SetRaw(resultBlock, "content_block.content", string(raw))
+		}
+	}
+	*output = translatorcommon.AppendSSEEventString(*output, "content_block_start", resultBlock, 3)
+	*output = translatorcommon.AppendSSEEventString(*output, "content_block_stop", fmt.Sprintf(`{"type":"content_block_stop","index":%d}`, params.ResponseIndex), 3)
+	params.ResponseIndex++
+
+	params.HasContent = true
+	params.WebSearchEmitted = true
 }
 
 // ConvertAntigravityResponseToClaudeNonStream converts a non-streaming Gemini CLI response to a non-streaming Claude response.
@@ -520,6 +636,25 @@ func ConvertAntigravityResponseToClaudeNonStream(_ context.Context, _ string, or
 
 	flushThinking()
 	flushText()
+	if query, results := extractWebSearchFromAntigravity(rawJSON); query != "" || len(results) > 0 {
+		ensureContentArray()
+		toolUseID := fmt.Sprintf("srvtoolu_%d", time.Now().UnixNano())
+		serverTool := `{"type":"server_tool_use","id":"","name":"web_search","input":{}}`
+		serverTool, _ = sjson.Set(serverTool, "id", toolUseID)
+		if query != "" {
+			serverTool, _ = sjson.Set(serverTool, "input.query", query)
+		}
+		responseJSON, _ = sjson.SetRawBytes(responseJSON, "content.-1", []byte(serverTool))
+
+		resultBlock := `{"type":"web_search_tool_result","tool_use_id":"","content":[]}`
+		resultBlock, _ = sjson.Set(resultBlock, "tool_use_id", toolUseID)
+		if len(results) > 0 {
+			if raw, err := json.Marshal(results); err == nil {
+				resultBlock, _ = sjson.SetRaw(resultBlock, "content", string(raw))
+			}
+		}
+		responseJSON, _ = sjson.SetRawBytes(responseJSON, "content.-1", []byte(resultBlock))
+	}
 
 	stopReason := "end_turn"
 	if hasToolCall {
