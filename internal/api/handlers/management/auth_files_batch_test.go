@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -73,7 +74,7 @@ func TestUploadAuthFile_BatchMultipart(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected uploaded file %s to exist: %v", file.name, err)
 		}
-		if string(data) != file.content {
+		if !jsonStringEqual(file.content, string(data)) {
 			t.Fatalf("expected file %s content %q, got %q", file.name, file.content, string(data))
 		}
 	}
@@ -137,7 +138,7 @@ func TestUploadAuthFile_BatchMultipart_InvalidJSONDoesNotOverwriteExistingFile(t
 	if err != nil {
 		t.Fatalf("expected existing auth file to remain readable: %v", err)
 	}
-	if string(data) != existingContent {
+	if !jsonStringEqual(existingContent, string(data)) {
 		t.Fatalf("expected existing auth file to remain %q, got %q", existingContent, string(data))
 	}
 
@@ -145,9 +146,21 @@ func TestUploadAuthFile_BatchMultipart_InvalidJSONDoesNotOverwriteExistingFile(t
 	if err != nil {
 		t.Fatalf("expected valid auth file to be created: %v", err)
 	}
-	if string(betaData) != files[1].content {
+	if !jsonStringEqual(files[1].content, string(betaData)) {
 		t.Fatalf("expected beta auth file content %q, got %q", files[1].content, string(betaData))
 	}
+}
+
+func jsonStringEqual(want, got string) bool {
+	var wantValue any
+	if err := json.Unmarshal([]byte(want), &wantValue); err != nil {
+		return false
+	}
+	var gotValue any
+	if err := json.Unmarshal([]byte(got), &gotValue); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(wantValue, gotValue)
 }
 
 func TestDeleteAuthFile_BatchQuery(t *testing.T) {
@@ -193,5 +206,47 @@ func TestDeleteAuthFile_BatchQuery(t *testing.T) {
 		if _, err := os.Stat(filepath.Join(authDir, name)); !os.IsNotExist(err) {
 			t.Fatalf("expected auth file %s to be removed, stat err: %v", name, err)
 		}
+	}
+}
+
+func TestUploadAuthFile_PopulatesBillingClassAttributeImmediately(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	manager := coreauth.NewManager(nil, nil, nil)
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "oauth.json")
+	if err != nil {
+		t.Fatalf("failed to create multipart file: %v", err)
+	}
+	content := `{"type":"claude","email":"oauth@example.com","billing_class":"per_request"}`
+	if _, err = part.Write([]byte(content)); err != nil {
+		t.Fatalf("failed to write multipart content: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("failed to close multipart writer: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodPost, "/v0/management/auth-files", &body)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	ctx.Request = req
+
+	h.UploadAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected upload status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	auths := manager.List()
+	if len(auths) != 1 {
+		t.Fatalf("expected 1 auth entry, got %d", len(auths))
+	}
+	if got := auths[0].Attributes["billing_class"]; got != "per-request" {
+		t.Fatalf("expected billing_class per-request immediately after upload, got %q", got)
 	}
 }

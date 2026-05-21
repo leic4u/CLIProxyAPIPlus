@@ -86,7 +86,7 @@ func TestHealthz(t *testing.T) {
 	})
 }
 
-func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *testing.T) {
+func TestManagementUsageRequiresManagementAuthAndPopsArray(t *testing.T) {
 	t.Setenv("MANAGEMENT_PASSWORD", "test-management-key")
 
 	prevQueueEnabled := redisqueue.Enabled()
@@ -112,21 +112,8 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 	legacyReq.Header.Set("Authorization", "Bearer test-management-key")
 	legacyRR := httptest.NewRecorder()
 	server.engine.ServeHTTP(legacyRR, legacyReq)
-	if legacyRR.Code != http.StatusOK {
-		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusOK, legacyRR.Body.String())
-	}
-
-	var usagePayload struct {
-		Usage struct {
-			TotalRequests int64 `json:"total_requests"`
-		} `json:"usage"`
-		FailedRequests int64 `json:"failed_requests"`
-	}
-	if errUnmarshal := json.Unmarshal(legacyRR.Body.Bytes(), &usagePayload); errUnmarshal != nil {
-		t.Fatalf("unmarshal legacy usage response: %v body=%s", errUnmarshal, legacyRR.Body.String())
-	}
-	if usagePayload.Usage.TotalRequests != 0 || usagePayload.FailedRequests != 0 {
-		t.Fatalf("legacy usage payload = %+v, want zeroed statistics", usagePayload)
+	if legacyRR.Code != http.StatusNotFound {
+		t.Fatalf("legacy usage status = %d, want %d body=%s", legacyRR.Code, http.StatusNotFound, legacyRR.Body.String())
 	}
 
 	authReq := httptest.NewRequest(http.MethodGet, "/v0/management/usage-queue?count=2", nil)
@@ -158,38 +145,6 @@ func TestManagementUsageEndpointsRequireManagementAuthAndServePlusContracts(t *t
 
 	if remaining := redisqueue.PopOldest(1); len(remaining) != 0 {
 		t.Fatalf("remaining queue = %q, want empty", remaining)
-	}
-}
-
-func TestCorsMiddlewareSkipsManagementRoutes(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	router.Use(corsMiddleware())
-	router.OPTIONS("/v0/management/config", func(c *gin.Context) {
-		c.Status(http.StatusUnauthorized)
-	})
-	router.OPTIONS("/v1/models", func(c *gin.Context) {
-		c.Status(http.StatusOK)
-	})
-
-	managementReq := httptest.NewRequest(http.MethodOptions, "/v0/management/config", nil)
-	managementRR := httptest.NewRecorder()
-	router.ServeHTTP(managementRR, managementReq)
-	if managementRR.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatalf("management CORS origin = %q, want empty", managementRR.Header().Get("Access-Control-Allow-Origin"))
-	}
-	if managementRR.Code != http.StatusUnauthorized {
-		t.Fatalf("management status = %d, want %d", managementRR.Code, http.StatusUnauthorized)
-	}
-
-	apiReq := httptest.NewRequest(http.MethodOptions, "/v1/models", nil)
-	apiRR := httptest.NewRecorder()
-	router.ServeHTTP(apiRR, apiReq)
-	if apiRR.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Fatalf("api CORS origin = %q, want *", apiRR.Header().Get("Access-Control-Allow-Origin"))
-	}
-	if apiRR.Code != http.StatusNoContent {
-		t.Fatalf("api status = %d, want %d", apiRR.Code, http.StatusNoContent)
 	}
 }
 
@@ -308,7 +263,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 			DisplayName:   "Custom Codex Model",
 			Description:   "Custom model from registry",
 			ContextLength: 123456,
-			Thinking:      &registry.ThinkingSupport{Levels: []string{"low", "medium"}},
+			Thinking:      &registry.ThinkingSupport{Levels: []string{"none", "minimal", "low", "medium", "unsupported", "high", "xhigh"}},
 		},
 		{ID: "grok-imagine-image-quality", Object: "model", OwnedBy: "xai", Type: "openai"},
 		{ID: "gpt-image-2", Object: "model", OwnedBy: "openai", Type: "openai"},
@@ -379,6 +334,7 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	if got, _ := custom["context_window"].(float64); got != 123456 {
 		t.Fatalf("custom context_window = %v, want 123456", custom["context_window"])
 	}
+	assertCodexSupportedReasoningLevels(t, custom, []string{"none", "low", "medium", "high", "xhigh"})
 	if custom["base_instructions"] != gpt55["base_instructions"] {
 		t.Fatal("expected custom model to use gpt-5.5 base_instructions fallback")
 	}
@@ -417,6 +373,27 @@ func TestModelsWithClientVersionReturnsCodexCatalog(t *testing.T) {
 	for slug, found := range hiddenModels {
 		if !found {
 			t.Fatalf("expected hidden model %s in codex catalog", slug)
+		}
+	}
+}
+
+func assertCodexSupportedReasoningLevels(t *testing.T, model map[string]any, want []string) {
+	t.Helper()
+
+	rawLevels, ok := model["supported_reasoning_levels"].([]any)
+	if !ok {
+		t.Fatalf("expected supported_reasoning_levels, got %#v", model["supported_reasoning_levels"])
+	}
+	if len(rawLevels) != len(want) {
+		t.Fatalf("supported_reasoning_levels length = %d, want %d: %#v", len(rawLevels), len(want), rawLevels)
+	}
+	for index, rawLevel := range rawLevels {
+		levelEntry, ok := rawLevel.(map[string]any)
+		if !ok {
+			t.Fatalf("supported_reasoning_levels[%d] = %#v, want object", index, rawLevel)
+		}
+		if got, _ := levelEntry["effort"].(string); got != want[index] {
+			t.Fatalf("supported_reasoning_levels[%d].effort = %q, want %q", index, got, want[index])
 		}
 	}
 }

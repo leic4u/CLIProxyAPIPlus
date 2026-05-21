@@ -90,6 +90,13 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
+	// PrimaryInfo tracks primary credential handoff state for providers that use
+	// a single-active-credential model (e.g. Antigravity). When non-nil, this
+	// credential participates in primary handoff: only the credential with
+	// IsPrimary=true is enabled for selection; the rest are disabled.
+	// Handoff is triggered on specific error status codes (401/403/429/502/503/504).
+	PrimaryInfo *PrimaryInfo `json:"primary_info,omitempty"`
+
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
@@ -106,9 +113,10 @@ const (
 )
 
 type recentRequestBucket struct {
-	bucketID int64
-	success  int64
-	failed   int64
+	bucketID        int64
+	success         int64
+	failed          int64
+	lastFailureReason string
 }
 
 type recentRequestRing struct {
@@ -116,9 +124,10 @@ type recentRequestRing struct {
 }
 
 type RecentRequestBucket struct {
-	Time    string `json:"time"`
-	Success int64  `json:"success"`
-	Failed  int64  `json:"failed"`
+	Time              string `json:"time"`
+	Success           int64  `json:"success"`
+	Failed            int64  `json:"failed"`
+	LastFailureReason string `json:"last_failure_reason,omitempty"`
 }
 
 // QuotaState contains limiter tracking data for a credential.
@@ -151,6 +160,20 @@ type ModelState struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// PrimaryInfo tracks primary credential handoff state for providers that use
+// a single-active-credential model. When non-nil, this credential participates
+// in primary handoff: only the credential with IsPrimary=true is enabled for
+// selection; the rest are disabled. Handoff is triggered on specific error
+// status codes (401/403/429/502/503/504).
+type PrimaryInfo struct {
+	// IsPrimary indicates whether this credential is the current primary.
+	IsPrimary bool `json:"is_primary"`
+	// Order defines the handoff order among credentials for the same provider.
+	// Lower values are preferred. When primary fails, the next lowest order
+	// credential becomes primary (wrap-around to first if all exhausted).
+	Order int `json:"order"`
+}
+
 func recentRequestBucketID(now time.Time) int64 {
 	if now.IsZero() {
 		return 0
@@ -172,7 +195,7 @@ func formatRecentRequestBucketLabel(bucketID int64) string {
 	return start.Format("15:04") + "-" + end.Format("15:04")
 }
 
-func (a *Auth) recordRecentRequest(now time.Time, success bool) {
+func (a *Auth) recordRecentRequest(now time.Time, success bool, failureReason string) {
 	if a == nil {
 		return
 	}
@@ -183,12 +206,16 @@ func (a *Auth) recordRecentRequest(now time.Time, success bool) {
 		bucket.bucketID = bucketID
 		bucket.success = 0
 		bucket.failed = 0
+		bucket.lastFailureReason = ""
 	}
 	if success {
 		bucket.success++
 		return
 	}
 	bucket.failed++
+	if failureReason != "" {
+		bucket.lastFailureReason = failureReason
+	}
 }
 
 func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
@@ -208,6 +235,7 @@ func (a *Auth) RecentRequestsSnapshot(now time.Time) []RecentRequestBucket {
 		if bucket.bucketID == bucketID {
 			entry.Success = bucket.success
 			entry.Failed = bucket.failed
+			entry.LastFailureReason = bucket.lastFailureReason
 		}
 		out = append(out, entry)
 	}
@@ -239,8 +267,30 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.ModelStates[key] = state.Clone()
 		}
 	}
+	if a.PrimaryInfo != nil {
+		copyAuth.PrimaryInfo = &PrimaryInfo{
+			IsPrimary: a.PrimaryInfo.IsPrimary,
+			Order:     a.PrimaryInfo.Order,
+		}
+	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
+}
+
+// SyncPrimaryInfoMetadata keeps persisted metadata aligned with the canonical
+// PrimaryInfo state for providers that serialize handoff information.
+func SyncPrimaryInfoMetadata(auth *Auth) {
+	if auth == nil || auth.Metadata == nil {
+		return
+	}
+	if auth.PrimaryInfo == nil {
+		delete(auth.Metadata, "primary_info")
+		return
+	}
+	auth.Metadata["primary_info"] = map[string]any{
+		"is_primary": auth.PrimaryInfo.IsPrimary,
+		"order":      auth.PrimaryInfo.Order,
+	}
 }
 
 func stableAuthIndex(seed string) string {

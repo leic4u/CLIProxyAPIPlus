@@ -199,7 +199,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 		return "", fmt.Errorf("postgres store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	if auth.Disabled && !shouldPersistDisabledAuth(auth) {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}
@@ -214,10 +214,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		syncPrimaryInfoMetadata(auth)
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -225,7 +222,7 @@ func (s *PostgresStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (stri
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
+		syncPrimaryInfoMetadata(auth)
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("postgres store: marshal metadata: %w", errMarshal)
@@ -297,10 +294,7 @@ func (s *PostgresStore) List(ctx context.Context) ([]*cliproxyauth.Auth, error) 
 			log.WithError(err).Warnf("postgres store: skipping auth %s with invalid json", id)
 			continue
 		}
-		provider := strings.TrimSpace(valueAsString(metadata["type"]))
-		if provider == "" {
-			provider = "unknown"
-		}
+		provider := canonicalizeAuthProvider(valueAsString(metadata["type"]))
 		attr := map[string]string{"path": path}
 		if email := strings.TrimSpace(valueAsString(metadata["email"])); email != "" {
 			attr["email"] = email

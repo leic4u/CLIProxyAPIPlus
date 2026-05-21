@@ -210,7 +210,7 @@ func (e *GitHubCopilotExecutor) Execute(ctx context.Context, auth *cliproxyauth.
 	if !isHTTPSuccess(httpResp.StatusCode) {
 		data, _ := io.ReadAll(httpResp.Body)
 		appendAPIResponseChunk(ctx, e.cfg, data)
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		e.logUpstreamError(ctx, auth, req.Model, body, url, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), data)
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return resp, err
 	}
@@ -355,7 +355,7 @@ func (e *GitHubCopilotExecutor) ExecuteStream(ctx context.Context, auth *cliprox
 			return nil, readErr
 		}
 		appendAPIResponseChunk(ctx, e.cfg, data)
-		log.Debugf("github-copilot executor: upstream error status: %d, body: %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		e.logUpstreamError(ctx, auth, req.Model, body, url, httpResp.StatusCode, httpResp.Header.Get("Content-Type"), data)
 		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return nil, err
 	}
@@ -774,6 +774,28 @@ func (e *GitHubCopilotExecutor) normalizeModel(model string, body []byte) []byte
 	return body
 }
 
+func (e *GitHubCopilotExecutor) logUpstreamError(ctx context.Context, auth *cliproxyauth.Auth, requestedModel string, requestBody []byte, url string, statusCode int, contentType string, responseBody []byte) {
+	upstreamModel := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+	if upstreamModel == "" {
+		upstreamModel = thinking.ParseSuffix(requestedModel).ModelName
+	}
+	logProvider := e.Identifier()
+	if ctxProvider, _, _ := cliproxyauth.GetProviderAuthFromContext(ctx); ctxProvider == "" && auth != nil {
+		displayAuth := strings.TrimSpace(auth.Label)
+		if displayAuth == "" {
+			displayAuth = strings.TrimSpace(auth.ID)
+		}
+		if displayAuth != "" {
+			logProvider = fmt.Sprintf("%s:%s", logProvider, displayAuth)
+		}
+	}
+	logModel := upstreamModel
+	if requested := strings.TrimSpace(requestedModel); requested != "" && requested != upstreamModel {
+		logModel = fmt.Sprintf("%s requested_model=%s", upstreamModel, requested)
+	}
+	logDetailedAPIError(ctx, e.cfg, logProvider, logModel, url, statusCode, contentType, requestBody, responseBody)
+}
+
 // copilotUnsupportedBetas lists beta headers that are Anthropic-specific and
 // must not be forwarded to GitHub Copilot. The context-1m beta enables 1M
 // context on Anthropic's API, but Copilot's Claude models are limited to
@@ -858,8 +880,18 @@ func useGitHubCopilotResponsesEndpoint(sourceFormat sdktranslator.Format, model 
 		return true
 	}
 	baseModel := strings.ToLower(thinking.ParseSuffix(model).ModelName)
-	if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
-		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+	providers := registry.GetGlobalRegistry().GetModelProviders(baseModel)
+	hasCopilotProvider := false
+	for _, provider := range providers {
+		if strings.EqualFold(provider, githubCopilotAuthType) {
+			hasCopilotProvider = true
+			break
+		}
+	}
+	if hasCopilotProvider {
+		if info := registry.GetGlobalRegistry().GetModelInfo(baseModel, githubCopilotAuthType); info != nil {
+			return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
+		}
 	}
 	if info := lookupGitHubCopilotStaticModelInfo(baseModel); info != nil {
 		return len(info.SupportedEndpoints) > 0 && !containsEndpoint(info.SupportedEndpoints, githubCopilotChatPath) && containsEndpoint(info.SupportedEndpoints, githubCopilotResponsesPath)
@@ -1666,6 +1698,9 @@ func FetchGitHubCopilotModels(ctx context.Context, auth *cliproxyauth.Auth, cfg 
 	seen := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		if entry.ID == "" {
+			continue
+		}
+		if !registry.IsAllowedGitHubCopilotModel(entry.ID) {
 			continue
 		}
 		// Deduplicate model IDs to avoid incorrect reference counting.

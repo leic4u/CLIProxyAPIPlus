@@ -17,9 +17,14 @@ const RequestPathMetadataKey = "request_path"
 // DisallowFreeAuthMetadataKey instructs auth selection to skip known free-tier credentials.
 const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 
+// ReasoningEffortMetadataKey stores the client-requested reasoning effort for usage logs.
+const ReasoningEffortMetadataKey = "reasoning_effort"
+
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
+	// EstimatedInputTokensMetadataKey stores a preflight estimated input token count.
+	EstimatedInputTokensMetadataKey = "estimated_input_tokens"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.

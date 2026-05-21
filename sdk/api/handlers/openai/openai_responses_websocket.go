@@ -589,7 +589,7 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 		return nil, ""
 	}
 	resolvedModelName := responsesWebsocketResolvedModelName(modelName)
-	providerSet, modelKey := responsesWebsocketProviderSetForModel(resolvedModelName)
+	providerSet, modelKey := h.responsesWebsocketProviderSetForModel(resolvedModelName)
 	if len(providerSet) == 0 {
 		return nil, modelKey
 	}
@@ -599,7 +599,17 @@ func (h *OpenAIResponsesAPIHandler) responsesWebsocketAvailableAuthsForModel(mod
 	auths := h.AuthManager.List()
 	available := make([]*coreauth.Auth, 0, len(auths))
 	for _, auth := range auths {
-		if !responsesWebsocketAuthMatchesModel(auth, providerSet, modelKey, registryRef, now) {
+		resolvedForAuth := modelKey
+		if h.AuthManager != nil {
+			if !h.AuthManager.AuthSupportsRouteModel(auth, resolvedModelName) {
+				continue
+			}
+			resolvedForAuth = h.AuthManager.ResolveRouteModelForAuth(auth, resolvedModelName)
+			if strings.TrimSpace(resolvedForAuth) == "" {
+				resolvedForAuth = modelKey
+			}
+		}
+		if !responsesWebsocketAuthMatchesModel(auth, providerSet, resolvedForAuth, registryRef, now) {
 			continue
 		}
 		available = append(available, auth)
@@ -619,12 +629,18 @@ func responsesWebsocketResolvedModelName(modelName string) string {
 	return util.ResolveAutoModel(modelName)
 }
 
-func responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
+func (h *OpenAIResponsesAPIHandler) responsesWebsocketProviderSetForModel(resolvedModelName string) (map[string]struct{}, string) {
 	parsed := thinking.ParseSuffix(resolvedModelName)
 	baseModel := strings.TrimSpace(parsed.ModelName)
 	providers := util.GetProviderName(baseModel)
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
+	}
+	if len(providers) == 0 && h != nil && h.AuthManager != nil {
+		providers = h.AuthManager.ProvidersForRouteModel(resolvedModelName)
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = h.AuthManager.ProvidersForRouteModel(baseModel)
+		}
 	}
 	providerSet := make(map[string]struct{}, len(providers))
 	for _, provider := range providers {

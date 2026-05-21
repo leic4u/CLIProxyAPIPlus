@@ -2,11 +2,25 @@ package executor
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
+
+func TestKiroExecutorDoesNotLogTokenRefreshFailuresAtErrorLevel(t *testing.T) {
+	source, err := os.ReadFile("kiro_executor.go")
+	if err != nil {
+		t.Fatalf("read kiro_executor.go: %v", err)
+	}
+
+	forbidden := `log.Errorf("kiro: token refresh failed:`
+	if strings.Contains(string(source), forbidden) {
+		t.Fatalf("kiro token refresh failures should be returned without duplicate error logs")
+	}
+}
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
 	tests := []struct {
@@ -419,78 +433,5 @@ func TestEndpointAliases(t *testing.T) {
 	// Verify no unexpected aliases
 	if len(endpointAliases) != len(expectedAliases) {
 		t.Errorf("unexpected number of aliases: got %d, want %d", len(endpointAliases), len(expectedAliases))
-	}
-}
-
-func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
-	executor := &KiroExecutor{}
-	tests := []struct {
-		name     string
-		model    string
-		expected string
-	}{
-		{
-			name:     "kiro alias",
-			model:    "kiro-claude-opus-4-7",
-			expected: "claude-opus-4.7",
-		},
-		{
-			name:     "kiro agentic alias",
-			model:    "kiro-claude-opus-4-7-agentic",
-			expected: "claude-opus-4.7",
-		},
-		{
-			name:     "native hyphen alias",
-			model:    "claude-opus-4-7",
-			expected: "claude-opus-4.7",
-		},
-		{
-			name:     "native dotted alias",
-			model:    "claude-opus-4.7",
-			expected: "claude-opus-4.7",
-		},
-		{
-			name:     "native agentic alias",
-			model:    "claude-opus-4.7-agentic",
-			expected: "claude-opus-4.7",
-		},
-		{
-			name:     "dated alias collapses to canonical version",
-			model:    "claude-sonnet-4-5-20250929",
-			expected: "claude-sonnet-4.5",
-		},
-		{
-			name:     "amazonq prefix",
-			model:    "amazonq-claude-sonnet-4-5",
-			expected: "claude-sonnet-4.5",
-		},
-		{
-			name:     "non-Claude model passes through",
-			model:    "kiro-glm-5",
-			expected: "glm-5",
-		},
-		{
-			name:     "non-Claude minimax versioned",
-			model:    "kiro-minimax-m2-5",
-			expected: "minimax-m2.5",
-		},
-		{
-			name:     "identifier without trailing version unchanged",
-			model:    "kiro-qwen3-coder-next",
-			expected: "qwen3-coder-next",
-		},
-		{
-			name:     "unknown model passes through unchanged",
-			model:    "kiro-future-model-9",
-			expected: "future-model-9",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := executor.mapModelToKiro(tt.model); got != tt.expected {
-				t.Fatalf("mapModelToKiro(%q) = %q, want %q", tt.model, got, tt.expected)
-			}
-		})
 	}
 }

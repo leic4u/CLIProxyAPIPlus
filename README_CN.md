@@ -1,6 +1,6 @@
-# CLIProxyAPI Plus
+# CLI 代理 API
 
-[English](README.md) | 中文
+[English](README.md) | 中文 | [日本語](README_JA.md)
 
 一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
 
@@ -32,9 +32,9 @@ PackyCode 为本软件用户提供了特别优惠：使用<a href="https://www.p
 </tr>
 <tr>
 <td width="180"><a href="https://coder.visioncoder.cn"><img src="./assets/visioncoder.png" alt="VisionCoder" width="150"></a></td>
-<td>感谢 VisionCoder 对本项目的支持。<a href="https://coder.visioncoder.cn" target="_blank">VisionCoder 开发平台</a> 是一个可靠高效的 API 中继服务提供商，提供 Claude Code、Codex、Gemini 等主流 AI 模型，帮助开发者和团队更轻松地集成 AI 功能，提升工作效率。
+<td>感谢 <b>VisionCoder</b> 对本项目的支持。<a href="https://coder.visioncoder.cn" target="_blank">VisionCoder 开发平台</a> 是一个可靠高效的 API 中继服务提供商，提供 Claude Code、Codex、Gemini 等主流 AI 模型，帮助开发者和团队更轻松地集成 AI 功能，提升工作效率。
 <p></p>
-VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" target="_blank">Token Plan</a> 限时活动：购买 1 个月，赠送 1 个月。</td>
+VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" target="_blank">Token Plan</a> 限时活动：<b>购买 1 个月，赠送 1 个月</b>。</td>
 </tr>
 </tbody>
 </table>
@@ -64,45 +64,13 @@ VisionCoder 还为我们的用户提供 <a href="https://coder.visioncoder.cn" t
 
 CLIProxyAPI 用户手册： [https://help.router-for.me/](https://help.router-for.me/cn/)
 
-### 使用 Docker 运行
-
-每个发布标签都会发布多架构镜像（`linux/amd64`、`linux/arm64`）到 Docker Hub 和 GitHub Container Registry。
-
-```sh
-# 拉取指定版本（推荐）
-docker pull kaitranntt/cli-proxy-api-plus:v6.9.45-0
-
-# 或拉取最新发布版本
-docker pull kaitranntt/cli-proxy-api-plus:latest
-```
-
-GHCR 镜像：
-
-```sh
-docker pull ghcr.io/kaitranntt/cli-proxy-api-plus:latest
-```
-
-也可以使用仓库内置的 `docker-compose.yml`（默认使用 Docker Hub 镜像；如需覆盖，可设置 `CLI_PROXY_IMAGE`）：
-
-```sh
-git clone https://github.com/kaitranntt/CLIProxyAPIPlus.git
-cd CLIProxyAPIPlus
-docker compose up -d
-```
-
-可用标签：
-- Docker Hub: [`kaitranntt/cli-proxy-api-plus`](https://hub.docker.com/r/kaitranntt/cli-proxy-api-plus)
-- GHCR: [`ghcr.io/kaitranntt/cli-proxy-api-plus`](https://github.com/kaitranntt/CLIProxyAPIPlus/pkgs/container/cli-proxy-api-plus)
-
 ## 管理 API 文档
 
 请参见 [MANAGEMENT_API_CN.md](https://help.router-for.me/cn/management/api)
 
 ## 使用量统计
 
-自 v6.10.0 版本以后，上游 CLIProxyAPI 及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能。CLIProxyAPIPlus 会通过自身的使用量日志和维护版 [CPAMC dashboard fork](https://github.com/kaitranntt/Cli-Proxy-API-Management-Center) 保留该工作流，并默认使用这个管理面板发布源。
-
-如果需要独立的外部使用量服务，请使用以下项目：
+自v6.10.0版本以后，CLIProxyAPI及 [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) 项目不再预置数据统计功能，如果有数据统计需求的请使用以下项目：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -145,7 +113,7 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 
 ## 贡献
 
-该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
+欢迎贡献！请随时提交 Pull Request。
 
 1. Fork 仓库
 2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
@@ -250,9 +218,21 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 
 一个公开的 CLIProxyAPI 兼容二开版本和配套管理面板，尽量保持与上游一致的使用方式，同时恢复内置使用量统计，并补充缓存命中率、首字响应时间、TPS 记录和面向 Docker 自托管的安装说明。
 
+### [Codex Switch](https://github.com/9ycrooked/CodexSwitch)
+
+这是一个使用 Tauri 2 + Vue 3 构建的工具，用于管理多个 OpenAI Codex 桌面账户。它可以在已保存的 ChatGPT/Codex 认证配置之间切换，实时查看 5 小时和每周配额使用情况，验证 token 健康状态，查看当前账户详情，并在无需手动复制的情况下导入或保存 auth.json 文件。
+
 > [!NOTE]  
 > 如果你开发了 CLIProxyAPI 的移植或衍生项目，请提交 PR 将其添加到此列表中。
 
 ## 许可证
 
 此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
+
+## 写给所有中国网友的
+
+QQ 群：188637136（满）、1081218164
+
+或
+
+Telegram 群：https://t.me/CLIProxyAPI

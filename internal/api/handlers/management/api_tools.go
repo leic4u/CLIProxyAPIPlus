@@ -8,13 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"strings"
 	"time"
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
-	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -27,8 +25,8 @@ import (
 const defaultAPICallTimeout = 60 * time.Second
 
 const (
-	geminiOAuthClientIDEnv = "CLIPROXY_GEMINI_OAUTH_CLIENT_ID"
-	geminiOAuthSecretEnv   = "CLIPROXY_GEMINI_OAUTH_CLIENT_SECRET"
+	geminiOAuthClientID     = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com"
+	geminiOAuthClientSecret = "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"
 )
 
 var geminiOAuthScopes = []string{
@@ -38,8 +36,8 @@ var geminiOAuthScopes = []string{
 }
 
 const (
-	antigravityOAuthClientIDEnv     = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_ID"
-	antigravityOAuthClientSecretEnv = "CLIPROXY_ANTIGRAVITY_OAUTH_CLIENT_SECRET"
+	antigravityOAuthClientID     = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
+	antigravityOAuthClientSecret = "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"
 )
 
 var antigravityOAuthTokenURL = "https://oauth2.googleapis.com/token"
@@ -244,6 +242,7 @@ func (h *Handler) APICall(c *gin.Context) {
 
 	respBody, errReadAll := io.ReadAll(resp.Body)
 	if errReadAll != nil {
+		log.Errorf("management APICall failed to read response body: %v", errReadAll)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "failed to read response"})
 		return
 	}
@@ -375,8 +374,8 @@ func (h *Handler) refreshGeminiOAuthAccessToken(ctx context.Context, auth *corea
 	}
 
 	conf := &oauth2.Config{
-		ClientID:     oauthClientValue(metadata, "client_id", geminiOAuthClientIDEnv),
-		ClientSecret: oauthClientValue(metadata, "client_secret", geminiOAuthSecretEnv),
+		ClientID:     geminiOAuthClientID,
+		ClientSecret: geminiOAuthClientSecret,
 		Scopes:       geminiOAuthScopes,
 		Endpoint:     google.Endpoint,
 	}
@@ -430,13 +429,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	clientID := antigravityOAuthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
-	clientSecret := antigravityOAuthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
-	if clientID == "" || clientSecret == "" {
-		return "", fmt.Errorf("antigravity oauth client credentials missing")
-	}
-	form.Set("client_id", clientID)
-	form.Set("client_secret", clientSecret)
+	form.Set("client_id", antigravityOAuthClientID)
+	form.Set("client_secret", antigravityOAuthClientSecret)
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", refreshToken)
 
@@ -482,6 +476,15 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		return "", fmt.Errorf("antigravity oauth token refresh returned empty access_token")
 	}
 
+	// Preserve tier info before refresh
+	var tierID, tierName string
+	var tierIsPaid bool
+	if auth.Metadata != nil {
+		tierID, _ = auth.Metadata["tier_id"].(string)
+		tierName, _ = auth.Metadata["tier_name"].(string)
+		tierIsPaid, _ = auth.Metadata["tier_is_paid"].(bool)
+	}
+
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -496,6 +499,17 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	}
 	auth.Metadata["type"] = "antigravity"
+
+	// Restore preserved tier info
+	if tierID != "" {
+		auth.Metadata["tier_id"] = tierID
+	}
+	if tierName != "" {
+		auth.Metadata["tier_name"] = tierName
+	}
+	if tierIsPaid {
+		auth.Metadata["tier_is_paid"] = tierIsPaid
+	}
 
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = now
@@ -588,27 +602,6 @@ func stringValue(metadata map[string]any, key string) string {
 		return strings.TrimSpace(v)
 	}
 	return ""
-}
-
-func oauthClientValue(metadata map[string]any, key string, envName string) string {
-	if value := stringValue(metadata, key); value != "" {
-		return value
-	}
-	return strings.TrimSpace(os.Getenv(envName))
-}
-
-func antigravityOAuthClientValue(metadata map[string]any, key string, envName string) string {
-	if value := oauthClientValue(metadata, key, envName); value != "" {
-		return value
-	}
-	switch envName {
-	case antigravityOAuthClientIDEnv:
-		return antigravityauth.DefaultClientID
-	case antigravityOAuthClientSecretEnv:
-		return antigravityauth.DefaultClientSecret
-	default:
-		return ""
-	}
 }
 
 func cloneMap(in map[string]any) map[string]any {

@@ -169,7 +169,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 		return "", fmt.Errorf("object store: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled {
+	if auth.Disabled && !shouldPersistDisabledAuth(auth) {
 		if _, statErr := os.Stat(path); errors.Is(statErr, fs.ErrNotExist) {
 			return "", nil
 		}
@@ -184,10 +184,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 
 	switch {
 	case auth.Storage != nil:
-		if auth.Metadata == nil {
-			auth.Metadata = make(map[string]any)
-		}
-		auth.Metadata["disabled"] = auth.Disabled
+		syncPrimaryInfoMetadata(auth)
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -195,7 +192,7 @@ func (s *ObjectTokenStore) Save(ctx context.Context, auth *cliproxyauth.Auth) (s
 			return "", err
 		}
 	case auth.Metadata != nil:
-		auth.Metadata["disabled"] = auth.Disabled
+		syncPrimaryInfoMetadata(auth)
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("object store: marshal metadata: %w", errMarshal)
@@ -573,10 +570,7 @@ func (s *ObjectTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Aut
 	if err = json.Unmarshal(data, &metadata); err != nil {
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
-	provider := strings.TrimSpace(valueAsString(metadata["type"]))
-	if provider == "" {
-		provider = "unknown"
-	}
+	provider := canonicalizeAuthProvider(valueAsString(metadata["type"]))
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat auth file: %w", err)

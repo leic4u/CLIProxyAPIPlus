@@ -22,6 +22,10 @@ import (
 	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/config"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
+	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
+	"github.com/tiktoken-go/tokenizer"
+
 	"golang.org/x/net/context"
 )
 
@@ -229,6 +233,17 @@ func requestExecutionMetadata(ctx context.Context) map[string]any {
 		meta[coreexecutor.DisallowFreeAuthMetadataKey] = true
 	}
 	return meta
+}
+
+func setReasoningEffortMetadata(meta map[string]any, handlerType, model string, rawJSON []byte) {
+	if meta == nil {
+		return
+	}
+	effort := thinking.ExtractReasoningEffort(rawJSON, handlerType, model)
+	if effort == "" {
+		return
+	}
+	meta[coreexecutor.ReasoningEffortMetadataKey] = effort
 }
 
 // headersFromContext extracts the original HTTP request headers from the gin context
@@ -547,22 +562,21 @@ func (h *BaseAPIHandler) ExecuteImageWithAuthManager(ctx context.Context, handle
 func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
+		attachUnknownProviderUpstreamHint(ctx, modelName, normalizedModel)
 		return nil, nil, errMsg
 	}
+	attachRouteFallbackToGinContext(ctx, modelName, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
+	maybeAttachEstimatedInputTokens(reqMeta, sdktranslator.FromString(handlerType), normalizedModel, rawJSON)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: payload,
+		Payload: cloneBytes(rawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 		Headers:         headersFromContext(ctx),
 	}
@@ -585,9 +599,9 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
+		return cloneBytes(resp.Payload), nil, nil
 	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+	return cloneBytes(resp.Payload), FilterUpstreamHeaders(resp.Headers), nil
 }
 
 // ExecuteCountWithAuthManager executes a non-streaming request via the core auth manager.
@@ -595,22 +609,21 @@ func (h *BaseAPIHandler) executeWithAuthManager(ctx context.Context, handlerType
 func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string) ([]byte, http.Header, *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetails(modelName)
 	if errMsg != nil {
+		attachUnknownProviderUpstreamHint(ctx, modelName, normalizedModel)
 		return nil, nil, errMsg
 	}
+	attachRouteFallbackToGinContext(ctx, modelName, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
+	maybeAttachEstimatedInputTokens(reqMeta, sdktranslator.FromString(handlerType), normalizedModel, rawJSON)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: payload,
+		Payload: cloneBytes(rawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          false,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 		Headers:         headersFromContext(ctx),
 	}
@@ -633,9 +646,9 @@ func (h *BaseAPIHandler) ExecuteCountWithAuthManager(ctx context.Context, handle
 		return nil, nil, &interfaces.ErrorMessage{StatusCode: status, Error: err, Addon: addon}
 	}
 	if !PassthroughHeadersEnabled(h.Cfg) {
-		return resp.Payload, nil, nil
+		return cloneBytes(resp.Payload), nil, nil
 	}
-	return resp.Payload, FilterUpstreamHeaders(resp.Headers), nil
+	return cloneBytes(resp.Payload), FilterUpstreamHeaders(resp.Headers), nil
 }
 
 // ExecuteStreamWithAuthManager executes a streaming request via the core auth manager.
@@ -653,25 +666,24 @@ func (h *BaseAPIHandler) ExecuteImageStreamWithAuthManager(ctx context.Context, 
 func (h *BaseAPIHandler) executeStreamWithAuthManager(ctx context.Context, handlerType, modelName string, rawJSON []byte, alt string, allowImageModel bool) (<-chan []byte, http.Header, <-chan *interfaces.ErrorMessage) {
 	providers, normalizedModel, errMsg := h.getRequestDetailsWithOptions(modelName, allowImageModel)
 	if errMsg != nil {
+		attachUnknownProviderUpstreamHint(ctx, modelName, normalizedModel)
 		errChan := make(chan *interfaces.ErrorMessage, 1)
 		errChan <- errMsg
 		close(errChan)
 		return nil, nil, errChan
 	}
+	attachRouteFallbackToGinContext(ctx, modelName, normalizedModel)
 	reqMeta := requestExecutionMetadata(ctx)
 	reqMeta[coreexecutor.RequestedModelMetadataKey] = modelName
-	payload := rawJSON
-	if len(payload) == 0 {
-		payload = nil
-	}
+	maybeAttachEstimatedInputTokens(reqMeta, sdktranslator.FromString(handlerType), normalizedModel, rawJSON)
 	req := coreexecutor.Request{
 		Model:   normalizedModel,
-		Payload: payload,
+		Payload: cloneBytes(rawJSON),
 	}
 	opts := coreexecutor.Options{
 		Stream:          true,
 		Alt:             alt,
-		OriginalRequest: rawJSON,
+		OriginalRequest: cloneBytes(rawJSON),
 		SourceFormat:    sdktranslator.FromString(handlerType),
 		Headers:         headersFromContext(ctx),
 	}
@@ -915,6 +927,30 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	if len(providers) == 0 && baseModel != resolvedModelName {
 		providers = util.GetProviderName(resolvedModelName)
 	}
+	if len(providers) == 0 && h != nil && h.AuthManager != nil {
+		providers = h.AuthManager.ProvidersForRouteModel(resolvedModelName)
+		if len(providers) == 0 && baseModel != resolvedModelName {
+			providers = h.AuthManager.ProvidersForRouteModel(baseModel)
+		}
+		if len(providers) == 0 {
+			providers = h.AuthManager.ProvidersForOAuthAliasWithoutRegisteredModels(resolvedModelName)
+			if len(providers) == 0 && baseModel != resolvedModelName {
+				providers = h.AuthManager.ProvidersForOAuthAliasWithoutRegisteredModels(baseModel)
+			}
+		}
+	}
+
+	if len(providers) == 0 && h != nil && h.AuthManager != nil {
+		if fbProviders, fbModel := h.AuthManager.ResolveProvidersForFallback(baseModel); len(fbProviders) > 0 {
+			log.WithFields(log.Fields{
+				"requested_model":         modelName,
+				"base_model":              baseModel,
+				"selected_fallback_model": fbModel,
+				"providers":               strings.Join(fbProviders, ","),
+			}).Infof("resolved request model through route fallback: requested=%s selected=%s", modelName, fbModel)
+			return fbProviders, fbModel, nil
+		}
+	}
 
 	if len(providers) == 0 {
 		return nil, "", &interfaces.ErrorMessage{StatusCode: http.StatusBadGateway, Error: fmt.Errorf("unknown provider for model %s", modelName)}
@@ -923,6 +959,127 @@ func (h *BaseAPIHandler) getRequestDetailsWithOptions(modelName string, allowIma
 	// The thinking suffix is preserved in the model name itself, so no
 	// metadata-based configuration passing is needed.
 	return providers, resolvedModelName, nil
+}
+
+func attachRouteFallbackToGinContext(ctx context.Context, requestedModel, normalizedModel string) {
+	if ctx == nil {
+		return
+	}
+	c, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || c == nil {
+		return
+	}
+	rm := strings.TrimSpace(requestedModel)
+	nm := strings.TrimSpace(normalizedModel)
+	if rm == "" || nm == "" || rm == nm {
+		return
+	}
+	c.Set("fallbackInfo", map[string]string{
+		"requested_model": rm,
+		"actual_model":    nm,
+	})
+}
+
+func attachUnknownProviderUpstreamHint(ctx context.Context, originalModel string, resolvedModel string) {
+	if ctx == nil {
+		return
+	}
+	c, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || c == nil {
+		return
+	}
+	model := strings.TrimSpace(resolvedModel)
+	if model == "" {
+		model = strings.TrimSpace(originalModel)
+	}
+	if model == "" {
+		return
+	}
+	provider := ""
+	parsed := thinking.ParseSuffix(model)
+	baseModel := strings.TrimSpace(parsed.ModelName)
+	providers := util.GetProviderName(baseModel)
+	if len(providers) == 0 && baseModel != model {
+		providers = util.GetProviderName(model)
+	}
+	if len(providers) > 0 {
+		provider = strings.TrimSpace(providers[0])
+	}
+	if provider == "" {
+		if configured := configuredClaudeLLMUpstreamURL(c); configured != "" {
+			c.Set("API_REQUEST_SUMMARY", map[string]string{
+				"url":   configured,
+				"model": baseModel,
+			})
+		}
+		return
+	}
+	upstreamURL := defaultLLMUpstreamURL(provider)
+	if provider == "claude" {
+		if configured := configuredClaudeLLMUpstreamURL(c); configured != "" {
+			upstreamURL = configured
+		}
+	}
+	if upstreamURL == "" {
+		return
+	}
+	c.Set("API_REQUEST_SUMMARY", map[string]string{
+		"url":   upstreamURL,
+		"model": baseModel,
+	})
+}
+
+func defaultLLMUpstreamURL(provider string) string {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "claude":
+		return "https://api.anthropic.com/v1/messages?beta=true"
+	case "openai":
+		return "https://api.openai.com/v1/chat/completions"
+	case "gemini":
+		return "https://generativelanguage.googleapis.com/v1beta/models"
+	default:
+		return ""
+	}
+}
+
+func configuredClaudeLLMUpstreamURL(c *gin.Context) string {
+	if c == nil {
+		return ""
+	}
+	handlerVal, exists := c.Get("handler")
+	if !exists {
+		return ""
+	}
+	h, ok := handlerVal.(*BaseAPIHandler)
+	if !ok || h == nil || h.AuthManager == nil {
+		return ""
+	}
+	for _, auth := range h.AuthManager.List() {
+		if auth == nil || !strings.EqualFold(strings.TrimSpace(auth.Provider), "claude") {
+			continue
+		}
+		kind, _ := auth.AccountInfo()
+		if kind == "" && auth.Attributes != nil {
+			kind = strings.TrimSpace(auth.Attributes["auth_kind"])
+		}
+		if strings.EqualFold(strings.TrimSpace(kind), "api_key") || strings.EqualFold(strings.TrimSpace(kind), "apikey") {
+			continue
+		}
+		baseURL := ""
+		if auth.Attributes != nil {
+			baseURL = strings.TrimSpace(auth.Attributes["base_url"])
+		}
+		if baseURL == "" && auth.Metadata != nil {
+			if v, ok := auth.Metadata["base_url"].(string); ok {
+				baseURL = strings.TrimSpace(v)
+			}
+		}
+		if baseURL == "" {
+			continue
+		}
+		return strings.TrimRight(baseURL, "/") + "/v1/messages?beta=true"
+	}
+	return ""
 }
 
 func routeModelBaseName(model string) string {
@@ -940,6 +1097,226 @@ func cloneBytes(src []byte) []byte {
 	dst := make([]byte, len(src))
 	copy(dst, src)
 	return dst
+}
+
+func maybeAttachEstimatedInputTokens(meta map[string]any, format sdktranslator.Format, model string, rawJSON []byte) {
+	if meta == nil || len(rawJSON) == 0 {
+		return
+	}
+	codec, err := tokenizerForModel(model)
+	if err != nil || codec == nil {
+		return
+	}
+	var count int
+	switch format {
+	case sdktranslator.FormatClaude:
+		count, err = estimateClaudeInputTokens(codec, rawJSON)
+	default:
+		count, err = estimateOpenAIInputTokens(codec, rawJSON)
+	}
+	if err != nil || count <= 0 {
+		return
+	}
+	meta[coreexecutor.EstimatedInputTokensMetadataKey] = count
+}
+
+func tokenizerForModel(model string) (tokenizer.Codec, error) {
+	sanitized := strings.ToLower(strings.TrimSpace(model))
+	if sanitized == "" {
+		return tokenizer.Get(tokenizer.Cl100kBase)
+	}
+	if strings.Contains(sanitized, "claude") || strings.HasPrefix(sanitized, "kiro-") || strings.HasPrefix(sanitized, "amazonq-") {
+		return tokenizer.Get(tokenizer.Cl100kBase)
+	}
+	switch {
+	case strings.HasPrefix(sanitized, "gpt-5"):
+		return tokenizer.ForModel(tokenizer.GPT5)
+	case strings.HasPrefix(sanitized, "gpt-4.1"):
+		return tokenizer.ForModel(tokenizer.GPT41)
+	case strings.HasPrefix(sanitized, "gpt-4o"):
+		return tokenizer.ForModel(tokenizer.GPT4o)
+	case strings.HasPrefix(sanitized, "gpt-4"):
+		return tokenizer.ForModel(tokenizer.GPT4)
+	case strings.HasPrefix(sanitized, "gpt-3.5"), strings.HasPrefix(sanitized, "gpt-3"):
+		return tokenizer.ForModel(tokenizer.GPT35Turbo)
+	case strings.HasPrefix(sanitized, "o1"):
+		return tokenizer.ForModel(tokenizer.O1)
+	case strings.HasPrefix(sanitized, "o3"):
+		return tokenizer.ForModel(tokenizer.O3)
+	case strings.HasPrefix(sanitized, "o4"):
+		return tokenizer.ForModel(tokenizer.O4Mini)
+	default:
+		return tokenizer.Get(tokenizer.O200kBase)
+	}
+}
+
+func estimateOpenAIInputTokens(enc tokenizer.Codec, payload []byte) (int, error) {
+	if enc == nil || len(payload) == 0 {
+		return 0, nil
+	}
+	root := gjson.ParseBytes(payload)
+	segments := make([]string, 0, 32)
+	collectOpenAISegments(root.Get("messages"), &segments)
+	collectOpenAIContentSegments(root.Get("input"), &segments)
+	collectOpenAIContentSegments(root.Get("prompt"), &segments)
+	collectOpenAIToolsSegments(root.Get("tools"), &segments)
+	joined := strings.TrimSpace(strings.Join(segments, "\n"))
+	if joined == "" {
+		return 0, nil
+	}
+	return enc.Count(joined)
+}
+
+func estimateClaudeInputTokens(enc tokenizer.Codec, payload []byte) (int, error) {
+	if enc == nil || len(payload) == 0 {
+		return 0, nil
+	}
+	root := gjson.ParseBytes(payload)
+	segments := make([]string, 0, 32)
+	collectClaudeContentSegments(root.Get("system"), &segments)
+	if messages := root.Get("messages"); messages.Exists() && messages.IsArray() {
+		messages.ForEach(func(_, msg gjson.Result) bool {
+			addSegment(&segments, msg.Get("role").String())
+			collectClaudeContentSegments(msg.Get("content"), &segments)
+			return true
+		})
+	}
+	if tools := root.Get("tools"); tools.Exists() && tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			addSegment(&segments, tool.Get("name").String())
+			addSegment(&segments, tool.Get("description").String())
+			if schema := tool.Get("input_schema"); schema.Exists() {
+				addSegment(&segments, schema.Raw)
+			}
+			return true
+		})
+	}
+	joined := strings.TrimSpace(strings.Join(segments, "\n"))
+	if joined == "" {
+		return 0, nil
+	}
+	return enc.Count(joined)
+}
+
+func collectOpenAISegments(messages gjson.Result, segments *[]string) {
+	if !messages.Exists() || !messages.IsArray() {
+		return
+	}
+	messages.ForEach(func(_, message gjson.Result) bool {
+		addSegment(segments, message.Get("role").String())
+		addSegment(segments, message.Get("name").String())
+		collectOpenAIContentSegments(message.Get("content"), segments)
+		if calls := message.Get("tool_calls"); calls.Exists() && calls.IsArray() {
+			calls.ForEach(func(_, call gjson.Result) bool {
+				addSegment(segments, call.Get("id").String())
+				addSegment(segments, call.Get("type").String())
+				addSegment(segments, call.Get("function.name").String())
+				addSegment(segments, call.Get("function.arguments").String())
+				return true
+			})
+		}
+		return true
+	})
+}
+
+func collectOpenAIContentSegments(content gjson.Result, segments *[]string) {
+	if !content.Exists() {
+		return
+	}
+	if content.Type == gjson.String {
+		addSegment(segments, content.String())
+		return
+	}
+	if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			partType := part.Get("type").String()
+			switch partType {
+			case "text", "input_text", "output_text":
+				addSegment(segments, part.Get("text").String())
+			case "tool_result":
+				collectOpenAIContentSegments(part.Get("content"), segments)
+			default:
+				if part.Type == gjson.JSON {
+					addSegment(segments, part.Raw)
+				} else {
+					addSegment(segments, part.String())
+				}
+			}
+			return true
+		})
+		return
+	}
+	if content.Type == gjson.JSON {
+		addSegment(segments, content.Raw)
+	}
+}
+
+func collectOpenAIToolsSegments(tools gjson.Result, segments *[]string) {
+	if !tools.Exists() {
+		return
+	}
+	if tools.IsArray() {
+		tools.ForEach(func(_, tool gjson.Result) bool {
+			addSegment(segments, tool.Get("type").String())
+			addSegment(segments, tool.Get("name").String())
+			addSegment(segments, tool.Get("description").String())
+			if fn := tool.Get("function"); fn.Exists() {
+				addSegment(segments, fn.Get("name").String())
+				addSegment(segments, fn.Get("description").String())
+				if params := fn.Get("parameters"); params.Exists() {
+					addSegment(segments, params.Raw)
+				}
+			}
+			return true
+		})
+	}
+}
+
+func collectClaudeContentSegments(content gjson.Result, segments *[]string) {
+	if !content.Exists() {
+		return
+	}
+	if content.Type == gjson.String {
+		addSegment(segments, content.String())
+		return
+	}
+	if content.IsArray() {
+		content.ForEach(func(_, part gjson.Result) bool {
+			switch part.Get("type").String() {
+			case "text":
+				addSegment(segments, part.Get("text").String())
+			case "tool_use":
+				addSegment(segments, part.Get("id").String())
+				addSegment(segments, part.Get("name").String())
+				if input := part.Get("input"); input.Exists() {
+					addSegment(segments, input.Raw)
+				}
+			case "tool_result":
+				addSegment(segments, part.Get("tool_use_id").String())
+				collectClaudeContentSegments(part.Get("content"), segments)
+			default:
+				if part.Type == gjson.JSON {
+					addSegment(segments, part.Raw)
+				} else {
+					addSegment(segments, part.String())
+				}
+			}
+			return true
+		})
+		return
+	}
+	if content.Type == gjson.JSON {
+		addSegment(segments, content.Raw)
+	}
+}
+
+func addSegment(segments *[]string, value string) {
+	if segments == nil {
+		return
+	}
+	if trimmed := strings.TrimSpace(value); trimmed != "" {
+		*segments = append(*segments, trimmed)
+	}
 }
 
 func cloneHeader(src http.Header) http.Header {
@@ -1040,7 +1417,7 @@ func (h *BaseAPIHandler) WriteErrorResponse(c *gin.Context, msg *interfaces.Erro
 	var previous []byte
 	if existing, exists := c.Get("API_RESPONSE"); exists {
 		if existingBytes, ok := existing.([]byte); ok && len(existingBytes) > 0 {
-			previous = existingBytes
+			previous = bytes.Clone(existingBytes)
 		}
 	}
 	appendAPIResponse(c, body)

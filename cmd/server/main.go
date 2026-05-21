@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
+
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
@@ -31,10 +32,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
+
 	log "github.com/sirupsen/logrus"
 )
 
@@ -86,6 +87,7 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
+	var xaiLogin bool
 	var cursorLogin bool
 	var kiroLogin bool
 	var kiroGoogleLogin bool
@@ -97,8 +99,8 @@ func main() {
 	var kiroIDCRegion string
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
+	var clineLogin bool
 	var codeBuddyLogin bool
-	var xaiLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -128,6 +130,7 @@ func main() {
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
+	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using OAuth")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
@@ -139,15 +142,15 @@ func main() {
 	flag.StringVar(&kiroIDCRegion, "kiro-idc-region", "", "IDC region (default: us-east-1)")
 	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC flow type: authcode (default) or device")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
+	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using OAuth")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
-	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
 	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
-	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured Home address")
+	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home-jwt address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -537,7 +540,6 @@ func main() {
 			}
 		}
 	}
-	usage.SetStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
@@ -618,6 +620,8 @@ func main() {
 		cmd.DoGitLabTokenLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
+	} else if xaiLogin {
+		cmd.DoXAILogin(cfg, options)
 	} else if cursorLogin {
 		cmd.DoCursorLogin(cfg, options)
 	} else if kiroLogin {
@@ -627,10 +631,6 @@ func main() {
 		// and don't share config with StartService (which is in the else branch)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroLogin(cfg, options)
 	} else if kiroGoogleLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
@@ -638,48 +638,26 @@ func main() {
 		// Note: This config mutation is safe - auth commands exit after completion
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroGoogleLogin(cfg, options)
 	} else if kiroAWSLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
 		// Users can explicitly override with --no-incognito
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroAWSLogin(cfg, options)
 	} else if kiroAWSAuthCode {
 		// For Kiro auth with authorization code flow (better UX)
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroImport(cfg, options)
 	} else if kiroIDCLogin {
 		// For Kiro IDC auth, default to incognito mode for multi-account support
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
-		kiro.InitRateLimiterConfig(cfg)
-		kiro.InitSystemPromptInjectConfig(cfg)
-		kiro.InitTruncationDetectorConfig(cfg)
-		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
-	} else if xaiLogin {
-		cmd.DoXAILogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -780,10 +758,6 @@ func main() {
 			}
 
 			if cfg.AuthDir != "" {
-				kiro.InitRateLimiterConfig(cfg)
-				kiro.InitSystemPromptInjectConfig(cfg)
-				kiro.InitTruncationDetectorConfig(cfg)
-				kiro.InitExtractThinkingTagConfig(cfg)
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
 				defer kiro.StopGlobalRefreshManager()
 			}

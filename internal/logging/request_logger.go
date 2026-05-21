@@ -192,45 +192,6 @@ func cloneHeaders(headers map[string][]string) map[string][]string {
 	return out
 }
 
-func sanitizeHomeHeaders(headers map[string][]string) map[string][]string {
-	if len(headers) == 0 {
-		return nil
-	}
-	out := make(map[string][]string, len(headers))
-	for key, values := range headers {
-		if strings.TrimSpace(key) == "" {
-			continue
-		}
-		if isHomeSensitiveHeader(key) {
-			out[key] = []string{"[REDACTED]"}
-			continue
-		}
-		if values == nil {
-			out[key] = nil
-			continue
-		}
-		copied := make([]string, len(values))
-		copy(copied, values)
-		out[key] = copied
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
-}
-
-func isHomeSensitiveHeader(key string) bool {
-	lowerKey := strings.ToLower(strings.TrimSpace(key))
-	switch lowerKey {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-goog-api-key":
-		return true
-	}
-	return strings.Contains(lowerKey, "api-key") ||
-		strings.Contains(lowerKey, "apikey") ||
-		strings.Contains(lowerKey, "token") ||
-		strings.Contains(lowerKey, "secret")
-}
-
 func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers map[string][]string, logText string) error {
 	if l == nil || !l.homeEnabled {
 		return nil
@@ -240,7 +201,7 @@ func (l *FileRequestLogger) forwardRequestLogToHome(ctx context.Context, headers
 		return nil
 	}
 	payload := homeRequestLogPayload{
-		Headers:    sanitizeHomeHeaders(headers),
+		Headers:    cloneHeaders(headers),
 		RequestLog: logText,
 	}
 	raw, errMarshal := json.Marshal(&payload)
@@ -381,13 +342,6 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		return fmt.Errorf("failed to create logs directory: %w", errEnsure)
 	}
 
-	// Generate filename with request ID
-	filename := l.generateFilename(url, requestID)
-	if force && !l.enabled {
-		filename = l.generateErrorFilename(url, requestID)
-	}
-	filePath := filepath.Join(l.logsDir, filename)
-
 	requestBodyPath, errTemp := l.writeRequestBodyTempFile(body)
 	if errTemp != nil {
 		log.WithError(errTemp).Warn("failed to create request body temp file, falling back to direct write")
@@ -406,13 +360,9 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		responseToWrite = response
 	}
 
-	logFile, errOpen := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
-	if errOpen != nil {
-		return fmt.Errorf("failed to create log file: %w", errOpen)
-	}
-
+	var buf bytes.Buffer
 	writeErr := l.writeNonStreamingLog(
-		logFile,
+		&buf,
 		url,
 		method,
 		requestHeaders,
@@ -430,17 +380,24 @@ func (l *FileRequestLogger) logRequest(url, method string, requestHeaders map[st
 		requestTimestamp,
 		apiResponseTimestamp,
 	)
-	if errClose := logFile.Close(); errClose != nil {
-		log.WithError(errClose).Warn("failed to close request log file")
-		if writeErr == nil {
-			return errClose
-		}
-	}
 	if writeErr != nil {
-		return fmt.Errorf("failed to write log file: %w", writeErr)
+		return fmt.Errorf("failed to build request log content: %w", writeErr)
 	}
 
-	if force && !l.enabled {
+	if l.enabled {
+		filename := l.generateFilename(url, requestID)
+		filePath := filepath.Join(l.logsDir, filename)
+		if errWrite := os.WriteFile(filePath, buf.Bytes(), 0644); errWrite != nil {
+			return fmt.Errorf("failed to write request log file: %w", errWrite)
+		}
+	}
+
+	if force {
+		errorFilename := l.generateErrorFilename(url, requestID)
+		errorFilePath := filepath.Join(l.logsDir, errorFilename)
+		if errWrite := os.WriteFile(errorFilePath, buf.Bytes(), 0644); errWrite != nil {
+			return fmt.Errorf("failed to write error request log file: %w", errWrite)
+		}
 		if errCleanup := l.cleanupOldErrorLogs(); errCleanup != nil {
 			log.WithError(errCleanup).Warn("failed to clean up old error logs")
 		}
@@ -1804,7 +1761,7 @@ func (w *homeStreamingLogWriter) Close() error {
 	}
 
 	payload := homeRequestLogPayload{
-		Headers:    sanitizeHomeHeaders(w.requestHeaders),
+		Headers:    cloneHeaders(w.requestHeaders),
 		RequestLog: buf.String(),
 	}
 	raw, errMarshal := json.Marshal(&payload)

@@ -24,6 +24,14 @@ import (
 type KiroPayload struct {
 	ConversationState KiroConversationState `json:"conversationState"`
 	ProfileArn        string                `json:"profileArn,omitempty"`
+	InferenceConfig   *KiroInferenceConfig  `json:"inferenceConfig,omitempty"`
+}
+
+// KiroInferenceConfig contains inference parameters for the Kiro API.
+type KiroInferenceConfig struct {
+	MaxTokens   int     `json:"maxTokens,omitempty"`
+	Temperature float64 `json:"temperature,omitempty"`
+	TopP        float64 `json:"topP,omitempty"`
 }
 
 // KiroConversationState holds the conversation context
@@ -133,7 +141,34 @@ func ConvertOpenAIRequestToKiro(modelName string, inputRawJSON []byte, stream bo
 // metadata parameter is kept for API compatibility but no longer used for thinking configuration.
 // Returns the payload and a boolean indicating whether thinking mode was injected.
 func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin string, isAgentic, isChatOnly bool, headers http.Header, metadata map[string]any) ([]byte, bool) {
-	log.Debugf("kiro-openai: BuildKiroPayloadFromOpenAI called, modelID=%s, origin=%s, isAgentic=%v, isChatOnly=%v", modelID, origin, isAgentic, isChatOnly)
+	// Extract max_tokens for potential use in inferenceConfig
+	// Handle -1 as "use maximum" (Kiro max output is ~32000 tokens)
+	const kiroMaxOutputTokens = 32000
+	var maxTokens int64
+	if mt := gjson.GetBytes(openaiBody, "max_tokens"); mt.Exists() {
+		maxTokens = mt.Int()
+		if maxTokens == -1 {
+			maxTokens = kiroMaxOutputTokens
+			log.Debugf("kiro-openai: max_tokens=-1 converted to %d", kiroMaxOutputTokens)
+		}
+	}
+
+	// Extract temperature if specified
+	var temperature float64
+	var hasTemperature bool
+	if temp := gjson.GetBytes(openaiBody, "temperature"); temp.Exists() {
+		temperature = temp.Float()
+		hasTemperature = true
+	}
+
+	// Extract top_p if specified
+	var topP float64
+	var hasTopP bool
+	if tp := gjson.GetBytes(openaiBody, "top_p"); tp.Exists() {
+		topP = tp.Float()
+		hasTopP = true
+		log.Debugf("kiro-openai: extracted top_p: %.2f", topP)
+	}
 
 	// Normalize origin value for Kiro API compatibility
 	origin = normalizeOrigin(origin)
@@ -149,15 +184,6 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 
 	// Extract system prompt from messages
 	systemPrompt := extractSystemPromptFromOpenAI(messages)
-
-	// Early exit: if system prompt injection is disabled, drop the client system prompt
-	// immediately to avoid unnecessary string building (timestamp, agentic, thinking tags, etc.)
-	if !kirocommon.IsSystemPromptInjectEnabled() {
-		if systemPrompt != "" {
-			log.Debugf("kiro-openai: system prompt injection disabled, dropping system prompt (len=%d)", len(systemPrompt))
-		}
-		systemPrompt = ""
-	}
 
 	// Inject timestamp context
 	timestamp := time.Now().Format("2006-01-02 15:04:05 MST")
@@ -205,10 +231,6 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 
 	// Convert OpenAI tools to Kiro format
 	kiroTools := convertOpenAIToolsToKiro(tools)
-	log.Infof("kiro-openai: tools conversion: input_exist=%v, output_count=%d", tools.IsArray(), len(kiroTools))
-	for i, t := range kiroTools {
-		log.Debugf("kiro-openai: tool[%d]: name=%s", i, t.ToolSpecification.Name)
-	}
 
 	// Thinking mode implementation:
 	// Kiro API supports official thinking/reasoning mode via <thinking_mode> tag.
@@ -236,16 +258,7 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		// Deduplicate currentToolResults
 		currentToolResults = deduplicateToolResults(currentToolResults)
 
-		// Build userInputMessageContext with tools and tool results.
-		// See claude translator for the rationale — Kiro rejects requests when
-		// history contains tool turns but currentMessage.tools is empty. Fall
-		// back to stub specs derived from history if the client omitted tools.
-		if len(kiroTools) == 0 && !isChatOnly {
-			kiroTools = synthesizeToolSpecsFromHistory(history)
-			if len(kiroTools) > 0 {
-				log.Infof("kiro-openai: synthesized %d stub tool spec(s) from history (client did not send tools)", len(kiroTools))
-			}
-		}
+		// Build userInputMessageContext with tools and tool results
 		if len(kiroTools) > 0 || len(currentToolResults) > 0 {
 			currentUserMsg.UserInputMessageContext = &KiroUserInputMessageContext{
 				Tools:       kiroTools,
@@ -260,26 +273,30 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 		currentMessage = KiroCurrentMessage{UserInputMessage: *currentUserMsg}
 	} else {
 		fallbackContent := ""
-		if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
+		if systemPrompt != "" {
 			fallbackContent = "--- SYSTEM PROMPT ---\n" + systemPrompt + "\n--- END SYSTEM PROMPT ---\n"
-			log.Debugf("kiro-openai: system prompt injected into fallback user message (len=%d)", len(systemPrompt))
-		} else if systemPrompt != "" {
-			log.Debugf("kiro-openai: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
-		} else {
-			log.Debugf("kiro-openai: no system prompt present in fallback user message")
-		}
-		// CRITICAL: Kiro API requires non-empty content for currentMessage.
-		// When system prompt injection is disabled, fallbackContent is empty.
-		// Use DefaultUserContent to avoid "Improperly formed request" 400 error.
-		if strings.TrimSpace(fallbackContent) == "" {
-			fallbackContent = kirocommon.DefaultUserContent
-			log.Debugf("kiro-openai: fallback user message content was empty, using default: %s", fallbackContent)
 		}
 		currentMessage = KiroCurrentMessage{UserInputMessage: KiroUserInputMessage{
 			Content: fallbackContent,
 			ModelID: modelID,
 			Origin:  origin,
 		}}
+	}
+
+	// Build inferenceConfig if we have any inference parameters
+	// Note: Kiro API doesn't actually use max_tokens for thinking budget
+	var inferenceConfig *KiroInferenceConfig
+	if maxTokens > 0 || hasTemperature || hasTopP {
+		inferenceConfig = &KiroInferenceConfig{}
+		if maxTokens > 0 {
+			inferenceConfig.MaxTokens = int(maxTokens)
+		}
+		if hasTemperature {
+			inferenceConfig.Temperature = temperature
+		}
+		if hasTopP {
+			inferenceConfig.TopP = topP
+		}
 	}
 
 	// Session IDs: extract from messages[].additional_kwargs (LangChain format) or random
@@ -297,7 +314,8 @@ func BuildKiroPayloadFromOpenAI(openaiBody []byte, modelID, profileArn, origin s
 			CurrentMessage:  currentMessage,
 			History:         history,
 		},
-		ProfileArn: profileArn,
+		ProfileArn:      profileArn,
+		InferenceConfig: inferenceConfig,
 	}
 
 	// Only set AgentContinuationID if client provided
@@ -400,43 +418,6 @@ func ensureKiroInputSchema(parameters interface{}) interface{} {
 	}
 }
 
-// synthesizeToolSpecsFromHistory builds stub KiroToolWrapper entries from any
-// toolUse names referenced in history. See the matching helper in the claude
-// translator for context — Kiro requires currentMessage.userInputMessageContext.tools
-// to be non-empty whenever history contains tool turns; otherwise the API
-// rejects the request with "Improperly formed request".
-func synthesizeToolSpecsFromHistory(history []KiroHistoryMessage) []KiroToolWrapper {
-	if len(history) == 0 {
-		return nil
-	}
-	seen := make(map[string]bool)
-	var stubs []KiroToolWrapper
-	for _, h := range history {
-		if h.AssistantResponseMessage == nil {
-			continue
-		}
-		for _, tu := range h.AssistantResponseMessage.ToolUses {
-			name := strings.TrimSpace(tu.Name)
-			if name == "" || seen[name] {
-				continue
-			}
-			seen[name] = true
-			stubs = append(stubs, KiroToolWrapper{
-				ToolSpecification: KiroToolSpecification{
-					Name:        shortenToolNameIfNeeded(name),
-					Description: fmt.Sprintf("Tool: %s", name),
-					InputSchema: KiroInputSchema{JSON: map[string]interface{}{
-						"type":                 "object",
-						"properties":           map[string]interface{}{},
-						"additionalProperties": true,
-					}},
-				},
-			})
-		}
-	}
-	return stubs
-}
-
 // convertOpenAIToolsToKiro converts OpenAI tools to Kiro format
 func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	var kiroTools []KiroToolWrapper
@@ -445,40 +426,19 @@ func convertOpenAIToolsToKiro(tools gjson.Result) []KiroToolWrapper {
 	}
 
 	for _, tool := range tools.Array() {
-		// Support two tool formats:
-		// 1. Standard OpenAI: {"type":"function","function":{"name":"...","description":"...","parameters":{...}}}
-		// 2. Flat format (Claude Code/Kiro IDE): {"name":"...","description":"...","parameters":{...}} or with "input_schema"
-		toolType := tool.Get("type").String()
-		var name, description string
-		var parametersResult gjson.Result
-
-		if toolType == "function" {
-			fn := tool.Get("function")
-			if !fn.Exists() {
-				log.Debugf("kiro-openai: skipping function tool with no function field")
-				continue
-			}
-			name = fn.Get("name").String()
-			description = fn.Get("description").String()
-			parametersResult = fn.Get("parameters")
-		} else if tool.Get("name").Exists() {
-			// Flat format: tool definition at top level (Claude Code / Kiro IDE)
-			name = tool.Get("name").String()
-			description = tool.Get("description").String()
-			parametersResult = tool.Get("parameters")
-			if !parametersResult.Exists() {
-				parametersResult = tool.Get("input_schema")
-			}
-			log.Debugf("kiro-openai: using flat tool format for tool: %s", name)
-		} else {
-			rawSnippet := tool.Raw
-			if len(rawSnippet) > 200 {
-				rawSnippet = rawSnippet[:200]
-			}
-			log.Infof("kiro-openai: skipping unrecognized tool format, raw=%s", rawSnippet)
+		// OpenAI tools have type "function" with function definition inside
+		if tool.Get("type").String() != "function" {
 			continue
 		}
 
+		fn := tool.Get("function")
+		if !fn.Exists() {
+			continue
+		}
+
+		name := fn.Get("name").String()
+		description := fn.Get("description").String()
+		parametersResult := fn.Get("parameters")
 		var parameters interface{}
 		if parametersResult.Exists() && parametersResult.Type != gjson.Null {
 			parameters = parametersResult.Value()
@@ -559,9 +519,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				// CRITICAL: Kiro API requires content to be non-empty for history messages
 				if strings.TrimSpace(userMsg.Content) == "" {
 					if len(toolResults) > 0 {
-						userMsg.Content = kirocommon.DefaultUserContentWithToolResults
+						userMsg.Content = "Tool results provided."
 					} else {
-						userMsg.Content = kirocommon.DefaultUserContent
+						userMsg.Content = "Continue"
 					}
 				}
 				// For history messages, embed tool results in context
@@ -582,7 +542,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 			// before this assistant message to maintain proper conversation structure
 			if len(pendingToolResults) > 0 {
 				syntheticUserMsg := KiroUserInputMessage{
-					Content: kirocommon.DefaultUserContentWithToolResults,
+					Content: "Tool results provided.",
 					ModelID: modelID,
 					Origin:  origin,
 					UserInputMessageContext: &KiroUserInputMessageContext{
@@ -599,9 +559,9 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 				history = append(history, KiroHistoryMessage{
 					AssistantResponseMessage: &assistantMsg,
 				})
-				// Create a continuation user message as currentMessage
+				// Create a "Continue" user message as currentMessage
 				currentUserMsg = &KiroUserInputMessage{
-					Content: kirocommon.DefaultUserContent,
+					Content: "Continue",
 					ModelID: modelID,
 					Origin:  origin,
 				}
@@ -636,7 +596,7 @@ func processOpenAIMessages(messages gjson.Result, modelID, origin string) ([]Kir
 		// If there's no current user message, create a synthetic one for the tool results
 		if currentUserMsg == nil {
 			currentUserMsg = &KiroUserInputMessage{
-				Content: kirocommon.DefaultUserContentWithToolResults,
+				Content: "Tool results provided.",
 				ModelID: modelID,
 				Origin:  origin,
 			}
@@ -675,11 +635,11 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 		}
 	}
 
-	for i := range history {
-		if history[i].UserInputMessage == nil || history[i].UserInputMessage.UserInputMessageContext == nil {
+	for i, h := range history {
+		if h.UserInputMessage == nil || h.UserInputMessage.UserInputMessageContext == nil {
 			continue
 		}
-		ctx := history[i].UserInputMessage.UserInputMessageContext
+		ctx := h.UserInputMessage.UserInputMessageContext
 		if len(ctx.ToolResults) == 0 {
 			continue
 		}
@@ -694,8 +654,7 @@ func filterOrphanedToolResults(history []KiroHistoryMessage, currentToolResults 
 		}
 		ctx.ToolResults = filtered
 		if len(ctx.ToolResults) == 0 && len(ctx.Tools) == 0 {
-			// Use index to modify the actual slice element, not a range copy
-			history[i].UserInputMessage.UserInputMessageContext = nil
+			h.UserInputMessage.UserInputMessageContext = nil
 		}
 	}
 
@@ -730,60 +689,6 @@ func buildUserMessageFromOpenAI(msg gjson.Result, modelID, origin string) (KiroU
 			switch partType {
 			case "text":
 				contentBuilder.WriteString(part.Get("text").String())
-			case "tool_result":
-				// Claude format: tool_result embedded in user message content array
-				toolUseID := part.Get("tool_use_id").String()
-				isError := part.Get("is_error").Bool()
-				resultContent := part.Get("content")
-
-				var textContents []KiroTextContent
-				if resultContent.IsArray() {
-					for _, item := range resultContent.Array() {
-						if item.Get("type").String() == "text" {
-							textContents = append(textContents, KiroTextContent{Text: item.Get("text").String()})
-						} else if item.Type == gjson.String {
-							textContents = append(textContents, KiroTextContent{Text: item.String()})
-						}
-					}
-				} else if resultContent.Type == gjson.String {
-					textContents = append(textContents, KiroTextContent{Text: resultContent.String()})
-				}
-
-				if len(textContents) == 0 {
-					textContents = append(textContents, KiroTextContent{Text: "Tool use was cancelled by the user"})
-				}
-
-				status := "success"
-				if isError {
-					status = "error"
-				}
-
-				if toolUseID != "" {
-					toolResults = append(toolResults, KiroToolResult{
-						ToolUseID: toolUseID,
-						Content:   textContents,
-						Status:    status,
-					})
-					log.Debugf("kiro-openai: extracted tool_result from user content array: toolUseId=%s", toolUseID)
-				}
-			case "image":
-				// Claude format: {"type":"image","source":{"type":"base64","media_type":"image/png","data":"..."}}
-				mediaType := part.Get("source.media_type").String()
-				data := part.Get("source.data").String()
-
-				format := ""
-				if idx := strings.LastIndex(mediaType, "/"); idx != -1 {
-					format = mediaType[idx+1:]
-				}
-
-				if format != "" && data != "" {
-					images = append(images, KiroImage{
-						Format: format,
-						Source: KiroImageSource{
-							Bytes: data,
-						},
-					})
-				}
 			case "image_url":
 				imageURL := part.Get("image_url.url").String()
 				if strings.HasPrefix(imageURL, "data:") {
@@ -914,15 +819,10 @@ func buildAssistantMessageFromOpenAI(msg gjson.Result) KiroAssistantResponseMess
 func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResult) string {
 	var contentBuilder strings.Builder
 
-	if systemPrompt != "" && kirocommon.IsSystemPromptInjectEnabled() {
+	if systemPrompt != "" {
 		contentBuilder.WriteString("--- SYSTEM PROMPT ---\n")
 		contentBuilder.WriteString(systemPrompt)
 		contentBuilder.WriteString("\n--- END SYSTEM PROMPT ---\n\n")
-		log.Debugf("kiro-openai: system prompt injected into user message content (len=%d)", len(systemPrompt))
-	} else if systemPrompt != "" {
-		log.Debugf("kiro-openai: system prompt dropped (inject disabled, len=%d)", len(systemPrompt))
-	} else {
-		log.Debugf("kiro-openai: no system prompt present")
 	}
 
 	contentBuilder.WriteString(content)
@@ -931,9 +831,9 @@ func buildFinalContent(content, systemPrompt string, toolResults []KiroToolResul
 	// CRITICAL: Kiro API requires content to be non-empty
 	if strings.TrimSpace(finalContent) == "" {
 		if len(toolResults) > 0 {
-			finalContent = kirocommon.DefaultUserContentWithToolResults
+			finalContent = "Tool results provided."
 		} else {
-			finalContent = kirocommon.DefaultUserContent
+			finalContent = "Continue"
 		}
 		log.Debugf("kiro-openai: content was empty, using default: %s", finalContent)
 	}

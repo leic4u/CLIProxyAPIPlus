@@ -2,6 +2,7 @@ package management
 
 import (
 	"net/http"
+	"path/filepath"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -176,5 +177,8 @@ func normalizeTokenThresholdRuleBillingClass(rule *config.TokenThresholdRule) {
 	}
 	if rule.ModelPattern != "" {
 		rule.ModelPattern = strings.Trim(strings.ReplaceAll(rule.ModelPattern, "\\", "/"), " ")
+		if base := filepath.Base(rule.ModelPattern); base != "." && base != "/" {
+			rule.ModelPattern = rule.ModelPattern
+		}
 	}
 }

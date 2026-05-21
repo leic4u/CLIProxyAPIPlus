@@ -2,14 +2,20 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tiktoken-go/tokenizer"
 )
@@ -32,6 +38,30 @@ func parseOpenAIResponsesUsage(data []byte) usage.Detail {
 
 func parseOpenAIResponsesStreamUsage(line []byte) (usage.Detail, bool) {
 	return helps.ParseOpenAIStreamUsage(line)
+}
+
+func parseGeminiUsage(data []byte) usage.Detail {
+	return helps.ParseGeminiUsage(data)
+}
+
+func parseGeminiStreamUsage(line []byte) (usage.Detail, bool) {
+	return helps.ParseGeminiStreamUsage(line)
+}
+
+func parseGeminiCLIUsage(data []byte) usage.Detail {
+	return helps.ParseGeminiCLIUsage(data)
+}
+
+func parseGeminiCLIStreamUsage(line []byte) (usage.Detail, bool) {
+	return helps.ParseGeminiCLIStreamUsage(line)
+}
+
+func parseClaudeUsage(data []byte) usage.Detail {
+	return helps.ParseClaudeUsage(data)
+}
+
+func parseClaudeStreamUsage(line []byte) (usage.Detail, bool) {
+	return helps.ParseClaudeStreamUsage(line)
 }
 
 func getTokenizer(model string) (tokenizer.Codec, error) {
@@ -78,6 +108,176 @@ func applyPayloadConfigWithRoot(cfg *config.Config, model, protocol, root string
 
 func summarizeErrorBody(contentType string, body []byte) string {
 	return helps.SummarizeErrorBody(contentType, body)
+}
+
+func FilterSSEUsageMetadata(payload []byte) []byte {
+	return helps.FilterSSEUsageMetadata(payload)
+}
+
+func logWithRequestID(ctx context.Context) *log.Entry {
+	return helps.LogWithRequestID(ctx)
+}
+
+const defaultDetailedAPILogBodyLimit = 4096
+
+func detailedAPILogBodyLimit(cfg *config.Config) int {
+	if cfg == nil || cfg.DetailedAPIErrorBodyLogLimit == 0 {
+		return defaultDetailedAPILogBodyLimit
+	}
+	return cfg.DetailedAPIErrorBodyLogLimit
+}
+
+func truncateDetailedAPILogBody(body string, limit int) string {
+	if limit < 0 || len(body) <= limit {
+		return body
+	}
+	if limit == 0 {
+		return "...[truncated]"
+	}
+	if !utf8.ValidString(body[:limit]) {
+		for limit > 0 && !utf8.ValidString(body[:limit]) {
+			limit--
+		}
+	}
+	return body[:limit] + "...[truncated]"
+}
+
+func formatDetailedAPILogBody(cfg *config.Config, contentType string, body []byte) string {
+	if len(body) == 0 {
+		return "<empty>"
+	}
+	if cfg != nil && strings.EqualFold(strings.TrimSpace(cfg.DetailedAPIErrorBodyLogFormat), "summary") {
+		return summarizeErrorBody(contentType, body)
+	}
+	formatted := strings.ToValidUTF8(string(body), "�")
+	formatted = truncateDetailedAPILogBody(formatted, detailedAPILogBodyLimit(cfg))
+	return strconv.QuoteToASCII(formatted)
+}
+
+func sanitizeDetailedAPIRequestBody(body []byte) []byte {
+	trimmed := strings.TrimSpace(string(body))
+	if trimmed == "" || !strings.HasPrefix(trimmed, "{") {
+		return body
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return body
+	}
+	if _, exists := payload["messages"]; !exists {
+		return body
+	}
+	cleaned := make(map[string]any, len(payload))
+	for k, v := range payload {
+		if k != "messages" {
+			cleaned[k] = v
+			continue
+		}
+		msgs, ok := v.([]any)
+		if !ok {
+			cleaned[k] = v
+			continue
+		}
+		masked := make([]any, len(msgs))
+		for i, msg := range msgs {
+			if msgMap, ok := msg.(map[string]any); ok {
+				maskedMsg := make(map[string]any, len(msgMap))
+				for mk, mv := range msgMap {
+					if mk == "content" {
+						maskedMsg[mk] = "[MASKED]"
+					} else {
+						maskedMsg[mk] = mv
+					}
+				}
+				masked[i] = maskedMsg
+			} else {
+				masked[i] = msg
+			}
+		}
+		cleaned[k] = masked
+	}
+	encoded, err := json.Marshal(cleaned)
+	if err != nil {
+		return body
+	}
+	return encoded
+}
+
+func logDetailedAPIError(ctx context.Context, cfg *config.Config, provider string, model string, url string, statusCode int, contentType string, requestBody []byte, responseBody []byte) {
+	entry := logWithRequestID(ctx)
+	logFn := entry.Warnf
+	if statusCode >= 500 {
+		logFn = entry.Errorf
+	}
+
+	providerDisplay := provider
+	if ctxProvider, authID, authLabel := cliproxyauth.GetProviderAuthFromContext(ctx); ctxProvider != "" {
+		displayAuth := authLabel
+		if displayAuth == "" {
+			displayAuth = authID
+		}
+		if displayAuth != "" {
+			providerDisplay = fmt.Sprintf("%s:%s", provider, displayAuth)
+		}
+	}
+	model = strings.TrimSpace(model)
+	if model != "" {
+		providerDisplay = fmt.Sprintf("%s model=%s", providerDisplay, model)
+	}
+
+	logFn("[%s] API error - URL: %s, Status: %d, Content-Type: %s, Request: %s, Response: %s",
+		providerDisplay,
+		url,
+		statusCode,
+		contentType,
+		formatDetailedAPILogBody(cfg, "application/json", sanitizeDetailedAPIRequestBody(requestBody)),
+		formatDetailedAPILogBody(cfg, contentType, responseBody),
+	)
+}
+
+func jsonPayload(line []byte) []byte {
+	return helps.JSONPayload(line)
+}
+
+func cachedUserID(apiKey string) string {
+	return helps.CachedUserID(apiKey)
+}
+
+func generateFakeUserID() string {
+	return helps.GenerateFakeUserID()
+}
+
+func isValidUserID(userID string) bool {
+	return helps.IsValidUserID(userID)
+}
+
+func shouldCloak(cloakMode string, userAgent string) bool {
+	return helps.ShouldCloak(cloakMode, userAgent)
+}
+
+type claudeDeviceProfile = helps.ClaudeDeviceProfile
+
+func claudeDeviceProfileStabilizationEnabled(cfg *config.Config) bool {
+	return helps.ClaudeDeviceProfileStabilizationEnabled(cfg)
+}
+
+func resolveClaudeDeviceProfile(auth *cliproxyauth.Auth, apiKey string, headers http.Header, cfg *config.Config) claudeDeviceProfile {
+	return helps.ResolveClaudeDeviceProfile(auth, apiKey, headers, cfg)
+}
+
+func applyClaudeDeviceProfileHeaders(r *http.Request, profile claudeDeviceProfile) {
+	helps.ApplyClaudeDeviceProfileHeaders(r, profile)
+}
+
+func applyClaudeLegacyDeviceHeaders(r *http.Request, ginHeaders http.Header, cfg *config.Config) {
+	helps.ApplyClaudeLegacyDeviceHeaders(r, ginHeaders, cfg)
+}
+
+func buildSensitiveWordMatcher(words []string) *helps.SensitiveWordMatcher {
+	return helps.BuildSensitiveWordMatcher(words)
+}
+
+func obfuscateSensitiveWords(payload []byte, matcher *helps.SensitiveWordMatcher) []byte {
+	return helps.ObfuscateSensitiveWords(payload, matcher)
 }
 
 func apiKeyFromContext(ctx context.Context) string {

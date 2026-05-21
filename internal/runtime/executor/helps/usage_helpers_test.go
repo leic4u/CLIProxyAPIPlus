@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
 
@@ -146,6 +147,47 @@ func TestUsageReporterBuildRecordIncludesLatency(t *testing.T) {
 	}
 }
 
+func TestStoreUsageDetailInContext(t *testing.T) {
+	c := &gin.Context{}
+	ctx := context.WithValue(context.Background(), "gin", c)
+
+	detail := usage.Detail{
+		InputTokens:     100,
+		OutputTokens:    200,
+		TotalTokens:     300,
+		CachedTokens:    50,
+		ReasoningTokens: 10,
+	}
+
+	storeUsageDetailInContext(ctx, detail)
+
+	stored, exists := c.Get("usageDetail")
+	if !exists {
+		t.Fatal("usageDetail not stored in gin context")
+	}
+
+	storedDetail, ok := stored.(usage.Detail)
+	if !ok {
+		t.Fatalf("stored value is not usage.Detail, got %T", stored)
+	}
+
+	if storedDetail.InputTokens != 100 {
+		t.Fatalf("InputTokens = %d, want 100", storedDetail.InputTokens)
+	}
+	if storedDetail.OutputTokens != 200 {
+		t.Fatalf("OutputTokens = %d, want 200", storedDetail.OutputTokens)
+	}
+	if storedDetail.TotalTokens != 300 {
+		t.Fatalf("TotalTokens = %d, want 300", storedDetail.TotalTokens)
+	}
+	if storedDetail.CachedTokens != 50 {
+		t.Fatalf("CachedTokens = %d, want 50", storedDetail.CachedTokens)
+	}
+	if storedDetail.ReasoningTokens != 10 {
+		t.Fatalf("ReasoningTokens = %d, want 10", storedDetail.ReasoningTokens)
+	}
+}
+
 func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	ctx := usage.WithRequestedModelAlias(context.Background(), "client-gpt")
 	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
@@ -156,6 +198,16 @@ func TestUsageReporterBuildRecordIncludesRequestedModelAlias(t *testing.T) {
 	}
 	if record.Alias != "client-gpt" {
 		t.Fatalf("alias = %q, want %q", record.Alias, "client-gpt")
+	}
+}
+
+func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
+	ctx := usage.WithReasoningEffort(context.Background(), "medium")
+	reporter := NewUsageReporter(ctx, "openai", "gpt-5.4", nil)
+
+	record := reporter.buildRecord(usage.Detail{TotalTokens: 3}, false)
+	if record.ReasoningEffort != "medium" {
+		t.Fatalf("reasoning effort = %q, want %q", record.ReasoningEffort, "medium")
 	}
 }
 

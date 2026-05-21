@@ -26,6 +26,7 @@ type UsageReporter struct {
 	authType    string
 	apiKey      string
 	source      string
+	reasoning   string
 	requestedAt time.Time
 	once        sync.Once
 }
@@ -44,6 +45,7 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		apiKey:      apiKey,
 		source:      resolveUsageSource(auth, apiKey),
 		authType:    resolveUsageAuthType(auth),
+		reasoning:   usage.ReasoningEffortFromContext(ctx),
 	}
 	if auth != nil {
 		reporter.authID = auth.ID
@@ -98,7 +100,8 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	}
 	detail = normalizeUsageDetailTotal(detail)
 	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(detail, failed, fail))
+		storeUsageDetailInContext(ctx, detail)
+		usage.PublishRecord(ctx, r.buildRecord(detail, failed, fail))
 	})
 }
 
@@ -156,19 +159,20 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 		return usage.Record{Model: model, Detail: detail, Failed: failed, Fail: fail}
 	}
 	return usage.Record{
-		Provider:    r.provider,
-		Model:       model,
-		Alias:       r.alias,
-		Source:      r.source,
-		APIKey:      r.apiKey,
-		AuthID:      r.authID,
-		AuthIndex:   r.authIndex,
-		AuthType:    r.authType,
-		RequestedAt: r.requestedAt,
-		Latency:     r.latency(),
-		Failed:      failed,
-		Fail:        fail,
-		Detail:      detail,
+		Provider:        r.provider,
+		Model:           model,
+		Alias:           r.alias,
+		Source:          r.source,
+		APIKey:          r.apiKey,
+		AuthID:          r.authID,
+		AuthIndex:       r.authIndex,
+		AuthType:        r.authType,
+		ReasoningEffort: r.reasoning,
+		RequestedAt:     r.requestedAt,
+		Latency:         r.latency(),
+		Failed:          failed,
+		Fail:            fail,
+		Detail:          detail,
 	}
 }
 
@@ -198,6 +202,17 @@ func (r *UsageReporter) latency() time.Duration {
 		return 0
 	}
 	return latency
+}
+
+func storeUsageDetailInContext(ctx context.Context, detail usage.Detail) {
+	if ctx == nil {
+		return
+	}
+	ginCtx, ok := ctx.Value("gin").(*gin.Context)
+	if !ok || ginCtx == nil {
+		return
+	}
+	ginCtx.Set("usageDetail", detail)
 }
 
 func APIKeyFromContext(ctx context.Context) string {
