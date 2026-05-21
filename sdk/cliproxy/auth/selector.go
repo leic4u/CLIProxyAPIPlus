@@ -28,7 +28,6 @@ type RoundRobinSelector struct {
 	mu      sync.Mutex
 	cursors map[string]int
 	maxKeys int
-	Mode    string // "key-based" or empty for default behavior
 }
 
 // FillFirstSelector selects the first available credential (deterministic ordering).
@@ -115,22 +114,18 @@ func (e *modelCooldownError) Headers() http.Header {
 }
 
 func authPriority(auth *Auth) int {
-	if auth == nil {
+	if auth == nil || auth.Attributes == nil {
 		return 0
 	}
-	basePriority := 0
-	if auth.Attributes != nil {
-		raw := strings.TrimSpace(auth.Attributes["priority"])
-		if raw != "" {
-			if parsed, err := strconv.Atoi(raw); err == nil {
-				basePriority = parsed
-			}
-		}
+	raw := strings.TrimSpace(auth.Attributes["priority"])
+	if raw == "" {
+		return 0
 	}
-	if auth.PrimaryInfo != nil && auth.PrimaryInfo.IsPrimary {
-		return basePriority + 1000000
+	parsed, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0
 	}
-	return basePriority
+	return parsed
 }
 
 func canonicalModelKey(model string) string {

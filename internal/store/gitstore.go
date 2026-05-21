@@ -268,7 +268,7 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 		return "", fmt.Errorf("auth filestore: missing file path attribute for %s", auth.ID)
 	}
 
-	if auth.Disabled && !shouldPersistDisabledAuth(auth) {
+	if auth.Disabled {
 		if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
 			return "", nil
 		}
@@ -287,7 +287,10 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 
 	switch {
 	case auth.Storage != nil:
-		syncPrimaryInfoMetadata(auth)
+		if auth.Metadata == nil {
+			auth.Metadata = make(map[string]any)
+		}
+		auth.Metadata["disabled"] = auth.Disabled
 		if setter, ok := auth.Storage.(interface{ SetMetadata(map[string]any) }); ok {
 			setter.SetMetadata(auth.Metadata)
 		}
@@ -295,7 +298,7 @@ func (s *GitTokenStore) Save(_ context.Context, auth *cliproxyauth.Auth) (string
 			return "", err
 		}
 	case auth.Metadata != nil:
-		syncPrimaryInfoMetadata(auth)
+		auth.Metadata["disabled"] = auth.Disabled
 		raw, errMarshal := json.Marshal(auth.Metadata)
 		if errMarshal != nil {
 			return "", fmt.Errorf("auth filestore: marshal metadata failed: %w", errMarshal)
@@ -469,7 +472,9 @@ func (s *GitTokenStore) readAuthFile(path, baseDir string) (*cliproxyauth.Auth, 
 		return nil, fmt.Errorf("unmarshal auth json: %w", err)
 	}
 	provider, _ := metadata["type"].(string)
-	provider = canonicalizeAuthProvider(provider)
+	if provider == "" {
+		provider = "unknown"
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return nil, fmt.Errorf("stat file: %w", err)

@@ -10,33 +10,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
-	configaccess "github.com/router-for-me/CLIProxyAPI/v6/internal/access/config_access"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/auth/kiro"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/buildinfo"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/cmd"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/logging"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/managementasset"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/misc"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/redisqueue"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/registry"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/store"
-	_ "github.com/router-for-me/CLIProxyAPI/v6/internal/translator"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/tui"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/usage"
-	"github.com/router-for-me/CLIProxyAPI/v6/internal/util"
-	sdkAuth "github.com/router-for-me/CLIProxyAPI/v6/sdk/auth"
-	coreauth "github.com/router-for-me/CLIProxyAPI/v6/sdk/cliproxy/auth"
-
 	configaccess "github.com/router-for-me/CLIProxyAPI/v7/internal/access/config_access"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/buildinfo"
@@ -51,10 +31,10 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usage"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	sdkAuth "github.com/router-for-me/CLIProxyAPI/v7/sdk/auth"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
-
 	log "github.com/sirupsen/logrus"
 )
 
@@ -86,121 +66,6 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	}
 }
 
-
-func parseHomeFlagConfig(rawAddr string, password string) (config.HomeConfig, error) {
-	rawAddr = strings.TrimSpace(rawAddr)
-	if rawAddr == "" {
-		return config.HomeConfig{}, fmt.Errorf("address is empty")
-	}
-
-	if strings.Contains(rawAddr, "://") {
-		return parseHomeURLConfig(rawAddr, password)
-	}
-
-	host, portStr, errSplit := net.SplitHostPort(rawAddr)
-	if errSplit != nil {
-		return config.HomeConfig{}, fmt.Errorf("expected host:port, redis://host:port, or rediss://host:port: %w", errSplit)
-	}
-
-	host = strings.TrimSpace(host)
-	if host == "" {
-		return config.HomeConfig{}, fmt.Errorf("host is empty")
-	}
-
-	port, errPort := parseHomePort(portStr)
-	if errPort != nil {
-		return config.HomeConfig{}, errPort
-	}
-
-	return config.HomeConfig{
-		Enabled:  true,
-		Host:     host,
-		Port:     port,
-		Password: password,
-	}, nil
-}
-
-func parseHomeURLConfig(rawAddr string, password string) (config.HomeConfig, error) {
-	parsed, errParse := url.Parse(rawAddr)
-	if errParse != nil {
-		return config.HomeConfig{}, fmt.Errorf("parse URL: %w", errParse)
-	}
-
-	scheme := strings.ToLower(strings.TrimSpace(parsed.Scheme))
-	if scheme != "redis" && scheme != "rediss" {
-		return config.HomeConfig{}, fmt.Errorf("unsupported URL scheme %q", parsed.Scheme)
-	}
-
-	host := strings.TrimSpace(parsed.Hostname())
-	if host == "" {
-		return config.HomeConfig{}, fmt.Errorf("host is empty")
-	}
-
-	port, errPort := parseHomePort(parsed.Port())
-	if errPort != nil {
-		return config.HomeConfig{}, errPort
-	}
-
-	if password == "" && parsed.User != nil {
-		if urlPassword, ok := parsed.User.Password(); ok {
-			password = urlPassword
-		}
-	}
-
-	homeCfg := config.HomeConfig{
-		Enabled:  true,
-		Host:     host,
-		Port:     port,
-		Password: password,
-	}
-	query := parsed.Query()
-	homeCfg.DisableClusterDiscovery = parseHomeBoolQuery(query, "disable-cluster-discovery", "disable_cluster_discovery")
-
-	if scheme == "rediss" {
-		homeCfg.TLS.Enable = true
-		homeCfg.TLS.ServerName = strings.TrimSpace(firstHomeQueryValue(query, "server-name", "server_name"))
-		homeCfg.TLS.InsecureSkipVerify = parseHomeBoolQuery(query, "insecure-skip-verify", "insecure_skip_verify", "skip_verify")
-		homeCfg.TLS.CACert = strings.TrimSpace(firstHomeQueryValue(query, "ca-cert", "ca_cert"))
-	}
-
-	return homeCfg, nil
-}
-
-func parseHomePort(rawPort string) (int, error) {
-	rawPort = strings.TrimSpace(rawPort)
-	if rawPort == "" {
-		return 0, fmt.Errorf("port is empty")
-	}
-
-	port, errPort := strconv.Atoi(rawPort)
-	if errPort != nil || port <= 0 || port > 65535 {
-		return 0, fmt.Errorf("invalid port %q", rawPort)
-	}
-
-	return port, nil
-}
-
-func firstHomeQueryValue(values url.Values, keys ...string) string {
-	for _, key := range keys {
-		if value := values.Get(key); value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-func parseHomeBoolQuery(values url.Values, keys ...string) bool {
-	for _, key := range keys {
-		value := strings.TrimSpace(values.Get(key))
-		if value == "" {
-			continue
-		}
-		parsed, errParse := strconv.ParseBool(value)
-		return errParse == nil && parsed
-	}
-	return false
-}
-
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -212,7 +77,6 @@ func main() {
 	var codexLogin bool
 	var codexDeviceLogin bool
 	var claudeLogin bool
-	var qwenLogin bool
 	var kiloLogin bool
 	var iflowLogin bool
 	var iflowCookie bool
@@ -222,7 +86,6 @@ func main() {
 	var oauthCallbackPort int
 	var antigravityLogin bool
 	var kimiLogin bool
-	var xaiLogin bool
 	var cursorLogin bool
 	var kiroLogin bool
 	var kiroGoogleLogin bool
@@ -230,21 +93,18 @@ func main() {
 	var kiroAWSAuthCode bool
 	var kiroImport bool
 	var kiroIDCLogin bool
-	var kiroCLILogin bool
 	var kiroIDCStartURL string
 	var kiroIDCRegion string
 	var kiroIDCFlow string
 	var githubCopilotLogin bool
-	var clineLogin bool
 	var codeBuddyLogin bool
-	var codeBuddyIntlLogin bool
+	var xaiLogin bool
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
 	var configPath string
 	var password string
-	var homeAddr string
-	var homePassword string
+	var homeJWT string
 	var homeDisableClusterDiscovery bool
 	var tuiMode bool
 	var standalone bool
@@ -257,7 +117,6 @@ func main() {
 	flag.BoolVar(&codexLogin, "codex-login", false, "Login to Codex using OAuth")
 	flag.BoolVar(&codexDeviceLogin, "codex-device-login", false, "Login to Codex using device code flow")
 	flag.BoolVar(&claudeLogin, "claude-login", false, "Login to Claude using OAuth")
-	flag.BoolVar(&qwenLogin, "qwen-login", false, "Login to Qwen using OAuth")
 	flag.BoolVar(&kiloLogin, "kilo-login", false, "Login to Kilo AI using device flow")
 	flag.BoolVar(&iflowLogin, "iflow-login", false, "Login to iFlow using OAuth")
 	flag.BoolVar(&iflowCookie, "iflow-cookie", false, "Login to iFlow using Cookie")
@@ -269,7 +128,6 @@ func main() {
 	flag.BoolVar(&noIncognito, "no-incognito", false, "Force disable incognito mode (uses existing browser session)")
 	flag.BoolVar(&antigravityLogin, "antigravity-login", false, "Login to Antigravity using OAuth")
 	flag.BoolVar(&kimiLogin, "kimi-login", false, "Login to Kimi using OAuth")
-	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.BoolVar(&cursorLogin, "cursor-login", false, "Login to Cursor using OAuth")
 	flag.BoolVar(&kiroLogin, "kiro-login", false, "Login to Kiro using Google OAuth")
 	flag.BoolVar(&kiroGoogleLogin, "kiro-google-login", false, "Login to Kiro using Google OAuth (same as --kiro-login)")
@@ -277,22 +135,19 @@ func main() {
 	flag.BoolVar(&kiroAWSAuthCode, "kiro-aws-authcode", false, "Login to Kiro using AWS Builder ID (authorization code flow, better UX)")
 	flag.BoolVar(&kiroImport, "kiro-import", false, "Import Kiro token from Kiro IDE (~/.aws/sso/cache/kiro-auth-token.json)")
 	flag.BoolVar(&kiroIDCLogin, "kiro-idc-login", false, "Login to Kiro using IAM Identity Center (IDC)")
-	flag.BoolVar(&kiroCLILogin, "kiro-cli-login", false, "Login to Kiro using native Kiro CLI OAuth flow")
 	flag.StringVar(&kiroIDCStartURL, "kiro-idc-start-url", "", "IDC start URL (required with --kiro-idc-login)")
 	flag.StringVar(&kiroIDCRegion, "kiro-idc-region", "", "IDC region (default: us-east-1)")
 	flag.StringVar(&kiroIDCFlow, "kiro-idc-flow", "", "IDC flow type: authcode (default) or device")
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
-	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using OAuth")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
-	flag.BoolVar(&codeBuddyIntlLogin, "codebuddy-intl-login", false, "Login to CodeBuddy International (codebuddy.ai) using browser OAuth flow")
+	flag.BoolVar(&xaiLogin, "xai-login", false, "Login to xAI using OAuth")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
 	flag.StringVar(&vertexImportPrefix, "vertex-import-prefix", "", "Prefix for Vertex model namespacing (use with -vertex-import)")
 	flag.StringVar(&password, "password", "", "")
-	flag.StringVar(&homeAddr, "home", "", "Home control plane address in host:port, redis://host:port, or rediss://host:port format (loads config from home and skips local config file)")
-	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured -home address")
-	flag.StringVar(&homePassword, "home-password", "", "Home control plane password (Redis AUTH)")
+	flag.StringVar(&homeJWT, "home-jwt", "", "Home control plane JWT for mTLS certificate bootstrap and connection")
+	flag.BoolVar(&homeDisableClusterDiscovery, "home-disable-cluster-discovery", false, "Disable Home CLUSTER NODES discovery and keep using the configured Home address")
 	flag.BoolVar(&tuiMode, "tui", false, "Start with terminal management UI")
 	flag.BoolVar(&standalone, "standalone", false, "In TUI mode, start an embedded local server")
 	flag.BoolVar(&localModel, "local-model", false, "Use embedded model catalog only, skip remote model fetching")
@@ -379,6 +234,13 @@ func main() {
 		return "", false
 	}
 	writableBase := util.WritablePath()
+
+	if strings.TrimSpace(homeJWT) == "" {
+		if v, ok := lookupEnv("HOME_JWT", "home_jwt"); ok {
+			homeJWT = v
+		}
+	}
+
 	if value, ok := lookupEnv("PGSTORE_DSN", "pgstore_dsn"); ok {
 		usePostgresStore = true
 		pgStoreDSN = value
@@ -442,12 +304,13 @@ func main() {
 	// Determine and load the configuration file.
 	// Prefer the Postgres store when configured, otherwise fallback to git or local files.
 	var configFilePath string
-	if strings.TrimSpace(homeAddr) != "" {
+	if strings.TrimSpace(homeJWT) != "" {
 		configLoadedFromHome = true
-		trimmedHomePassword := strings.TrimSpace(homePassword)
-		homeCfg, errHomeCfg := parseHomeFlagConfig(homeAddr, trimmedHomePassword)
+		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
+		homeCfg, errHomeCfg := home.ConfigFromJWT(ctxHome, homeJWT)
+		cancelHome()
 		if errHomeCfg != nil {
-			log.Errorf("invalid -home address %q: %v", homeAddr, errHomeCfg)
+			log.Errorf("invalid -home-jwt: %v", errHomeCfg)
 			return
 		}
 		if homeDisableClusterDiscovery {
@@ -456,9 +319,9 @@ func main() {
 		homeClient := home.New(homeCfg)
 		defer homeClient.Close()
 
-		ctxHome, cancelHome := context.WithTimeout(context.Background(), 30*time.Second)
-		raw, errGetConfig := homeClient.GetConfig(ctxHome)
-		cancelHome()
+		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
+		raw, errGetConfig := homeClient.GetConfig(ctxHomeConfig)
+		cancelHomeConfig()
 		if errGetConfig != nil {
 			log.Errorf("failed to fetch config from home: %v", errGetConfig)
 			return
@@ -732,12 +595,8 @@ func main() {
 		// Handle GitHub Copilot login
 		cmd.DoGitHubCopilotLogin(cfg, options)
 	} else if codeBuddyLogin {
+		// Handle CodeBuddy login
 		cmd.DoCodeBuddyLogin(cfg, options)
-	} else if codeBuddyIntlLogin {
-		cmd.DoCodeBuddyIntlLogin(cfg, options)
-	} else if clineLogin {
-		// Handle Cline login
-		cmd.DoClineLogin(cfg, options)
 	} else if codexLogin {
 		// Handle Codex login
 		cmd.DoCodexLogin(cfg, options)
@@ -747,8 +606,6 @@ func main() {
 	} else if claudeLogin {
 		// Handle Claude login
 		cmd.DoClaudeLogin(cfg, options)
-	} else if qwenLogin {
-		cmd.DoQwenLogin(cfg, options)
 	} else if kiloLogin {
 		cmd.DoKiloLogin(cfg, options)
 	} else if iflowLogin {
@@ -761,8 +618,6 @@ func main() {
 		cmd.DoGitLabTokenLogin(cfg, options)
 	} else if kimiLogin {
 		cmd.DoKimiLogin(cfg, options)
-	} else if xaiLogin {
-		cmd.DoXAILogin(cfg, options)
 	} else if cursorLogin {
 		cmd.DoCursorLogin(cfg, options)
 	} else if kiroLogin {
@@ -774,6 +629,8 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroLogin(cfg, options)
 	} else if kiroGoogleLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
@@ -783,6 +640,8 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroGoogleLogin(cfg, options)
 	} else if kiroAWSLogin {
 		// For Kiro auth, default to incognito mode for multi-account support
@@ -791,6 +650,8 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroAWSLogin(cfg, options)
 	} else if kiroAWSAuthCode {
 		// For Kiro auth with authorization code flow (better UX)
@@ -798,11 +659,15 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroAWSAuthCodeLogin(cfg, options)
 	} else if kiroImport {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroImport(cfg, options)
 	} else if kiroIDCLogin {
 		// For Kiro IDC auth, default to incognito mode for multi-account support
@@ -810,11 +675,11 @@ func main() {
 		kiro.InitFingerprintConfig(cfg)
 		kiro.InitRateLimiterConfig(cfg)
 		kiro.InitSystemPromptInjectConfig(cfg)
+		kiro.InitTruncationDetectorConfig(cfg)
+		kiro.InitExtractThinkingTagConfig(cfg)
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
-	} else if kiroCLILogin {
-		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
-		kiro.InitFingerprintConfig(cfg)
-		cmd.DoKiroCLILogin(cfg, options)
+	} else if xaiLogin {
+		cmd.DoXAILogin(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -917,6 +782,8 @@ func main() {
 			if cfg.AuthDir != "" {
 				kiro.InitRateLimiterConfig(cfg)
 				kiro.InitSystemPromptInjectConfig(cfg)
+				kiro.InitTruncationDetectorConfig(cfg)
+				kiro.InitExtractThinkingTagConfig(cfg)
 				kiro.InitializeAndStart(cfg.AuthDir, cfg)
 				defer kiro.StopGlobalRefreshManager()
 			}

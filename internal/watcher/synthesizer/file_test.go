@@ -71,7 +71,6 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	authData := map[string]any{
 		"type":      "claude",
 		"email":     "test@example.com",
-		"base_url":  "https://proxy.example.com/anthropic",
 		"proxy_url": "http://proxy.local",
 		"prefix":    "test-prefix",
 		"headers": map[string]string{
@@ -114,9 +113,6 @@ func TestFileSynthesizer_Synthesize_ValidAuthFile(t *testing.T) {
 	}
 	if auths[0].ProxyURL != "http://proxy.local" {
 		t.Errorf("expected proxy_url http://proxy.local, got %s", auths[0].ProxyURL)
-	}
-	if got := auths[0].Attributes["base_url"]; got != "https://proxy.example.com/anthropic" {
-		t.Errorf("expected base_url https://proxy.example.com/anthropic, got %s", got)
 	}
 	if got := auths[0].Attributes["header:X-Test"]; got != "value" {
 		t.Errorf("expected header:X-Test value, got %q", got)
@@ -380,88 +376,6 @@ func TestFileSynthesizer_Synthesize_PriorityParsing(t *testing.T) {
 				t.Fatalf("expected priority attribute to be absent, got %q", value)
 			}
 		})
-	}
-}
-
-func TestFileSynthesizer_Synthesize_BillingClassParsing(t *testing.T) {
-	tests := []struct {
-		name     string
-		value    any
-		want     string
-		hasValue bool
-	}{
-		{name: "metered", value: "metered", want: "metered", hasValue: true},
-		{name: "per_request alias", value: "per_request", want: "per-request", hasValue: true},
-		{name: "invalid", value: "foo", hasValue: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			tempDir := t.TempDir()
-			authData := map[string]any{"type": "claude", "billing_class": tt.value}
-			data, _ := json.Marshal(authData)
-			if err := os.WriteFile(filepath.Join(tempDir, "auth.json"), data, 0644); err != nil {
-				t.Fatalf("failed to write auth file: %v", err)
-			}
-			synth := NewFileSynthesizer()
-			ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: tempDir, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
-			auths, err := synth.Synthesize(ctx)
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if len(auths) != 1 {
-				t.Fatalf("expected 1 auth, got %d", len(auths))
-			}
-			value, ok := auths[0].Attributes["billing_class"]
-			if tt.hasValue {
-				if !ok {
-					t.Fatal("expected billing_class attribute to be set")
-				}
-				if value != tt.want {
-					t.Fatalf("expected billing_class %q, got %q", tt.want, value)
-				}
-			} else if ok {
-				t.Fatalf("expected billing_class attribute to be absent, got %q", value)
-			}
-		})
-	}
-}
-
-func TestFileSynthesizer_Synthesize_AntigravityPrimaryInfo(t *testing.T) {
-	tempDir := t.TempDir()
-	authData := map[string]any{
-		"type":     "antigravity",
-		"disabled": true,
-		"primary_info": map[string]any{
-			"is_primary": false,
-			"order":      2,
-		},
-	}
-	data, _ := json.Marshal(authData)
-	if err := os.WriteFile(filepath.Join(tempDir, "antigravity.json"), data, 0644); err != nil {
-		t.Fatalf("failed to write auth file: %v", err)
-	}
-
-	synth := NewFileSynthesizer()
-	ctx := &SynthesisContext{Config: &config.Config{}, AuthDir: tempDir, Now: time.Now(), IDGenerator: NewStableIDGenerator()}
-	auths, err := synth.Synthesize(ctx)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(auths) != 1 {
-		t.Fatalf("expected 1 auth, got %d", len(auths))
-	}
-	if auths[0].PrimaryInfo == nil {
-		t.Fatal("expected primary info to be restored")
-	}
-	if auths[0].PrimaryInfo.IsPrimary {
-		t.Fatal("expected antigravity auth to remain standby")
-	}
-	if auths[0].PrimaryInfo.Order != 2 {
-		t.Fatalf("expected order 2, got %d", auths[0].PrimaryInfo.Order)
-	}
-	if !auths[0].Disabled {
-		t.Fatal("expected disabled standby auth to remain disabled")
 	}
 }
 
@@ -876,30 +790,6 @@ func TestSynthesizeGeminiVirtualAuths_NotePropagated(t *testing.T) {
 		}
 		if got := v.Attributes["priority"]; got != "5" {
 			t.Errorf("virtual %d: expected priority %q, got %q", i, "5", got)
-		}
-	}
-}
-
-func TestSynthesizeGeminiVirtualAuths_BillingClassPropagated(t *testing.T) {
-	now := time.Now()
-	primary := &coreauth.Auth{
-		ID:       "primary-id",
-		Provider: "gemini-cli",
-		Label:    "test@example.com",
-		Attributes: map[string]string{
-			"source":        "test-source",
-			"path":          "/path/to/auth",
-			"billing_class": "metered",
-		},
-	}
-	metadata := map[string]any{"project_id": "proj-a, proj-b", "email": "test@example.com", "type": "gemini"}
-	virtuals := SynthesizeGeminiVirtualAuths(primary, metadata, now)
-	if len(virtuals) != 2 {
-		t.Fatalf("expected 2 virtuals, got %d", len(virtuals))
-	}
-	for i, v := range virtuals {
-		if got := v.Attributes["billing_class"]; got != "metered" {
-			t.Errorf("virtual %d: expected billing_class %q, got %q", i, "metered", got)
 		}
 	}
 }

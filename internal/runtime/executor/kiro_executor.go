@@ -23,7 +23,6 @@ import (
 	"github.com/google/uuid"
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	kiroclaude "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/claude"
 	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 	kiroopenai "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/openai"
@@ -372,9 +371,8 @@ func buildKiroEndpointConfigs(region string) []kiroEndpointConfig {
 		},
 		{
 			// Fallback: CodeWhisperer endpoint (legacy, only works in us-east-1)
-			// Keep AI_EDITOR semantics even for kiro-cli auth; sentinel value is normalized by translator.
 			URL:       fmt.Sprintf("https://codewhisperer.%s.amazonaws.com/generateAssistantResponse", region),
-			Origin:    "KIRO_AI_EDITOR",
+			Origin:    "AI_EDITOR",
 			AmzTarget: "AmazonCodeWhispererStreamingService.GenerateAssistantResponse",
 			Name:      "CodeWhisperer",
 		},
@@ -497,59 +495,21 @@ func NewKiroExecutor(cfg *config.Config) *KiroExecutor {
 func (e *KiroExecutor) Identifier() string { return "kiro" }
 
 // applyDynamicFingerprint applies account-specific fingerprint headers to the request.
-func isKiroCLIAuth(auth *cliproxyauth.Auth) bool {
-	if auth == nil {
-		return false
-	}
-	if auth.Metadata != nil {
-		if method, ok := auth.Metadata["auth_method"].(string); ok && kiroauth.IsKiroCLIAuthMethod(method) {
-			return true
-		}
-	}
-	if auth.Attributes != nil {
-		if method := auth.Attributes["auth_method"]; kiroauth.IsKiroCLIAuthMethod(method) {
-			return true
-		}
-	}
-	return false
-}
-
-func resolveRequestOrigin(auth *cliproxyauth.Auth, fallback string) string {
-	if isKiroCLIAuth(auth) {
-		if strings.EqualFold(strings.TrimSpace(fallback), kiroauth.KiroOriginAIEditor) {
-			return kiroauth.KiroOriginCLI
-		}
-		return fallback
-	}
-	if fallback != "" {
-		return fallback
-	}
-	return kiroauth.KiroOriginAIEditor
-}
-
 func applyDynamicFingerprint(req *http.Request, auth *cliproxyauth.Auth) {
 	accountKey := getAccountKey(auth)
 	fp := kiroauth.GlobalFingerprintManager().GetFingerprint(accountKey)
-	kiroCLI := isKiroCLIAuth(auth)
 
-	if kiroCLI {
-		req.Header.Set("User-Agent", fp.BuildRustStreamingUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildRustStreamingAmzUserAgent())
-		req.Header.Del("x-amzn-kiro-agent-mode")
-		req.Header.Set("x-amzn-codewhisperer-optout", "false")
-	} else {
-		req.Header.Set("User-Agent", fp.BuildUserAgent())
-		req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
-		req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
-		req.Header.Set("x-amzn-codewhisperer-optout", "true")
-	}
+	req.Header.Set("User-Agent", fp.BuildUserAgent())
+	req.Header.Set("X-Amz-User-Agent", fp.BuildAmzUserAgent())
+	req.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 
 	keyPrefix := accountKey
 	if len(keyPrefix) > 8 {
 		keyPrefix = keyPrefix[:8]
 	}
-	log.Debugf("kiro: using dynamic fingerprint for account %s (cli=%v, SDK:%s, OS:%s/%s, Kiro:%s)",
-		keyPrefix+"...", kiroCLI, fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
+	log.Debugf("kiro: using dynamic fingerprint for account %s (SDK:%s, OS:%s/%s, Kiro:%s)",
+		keyPrefix+"...", fp.StreamingSDKVersion, fp.OSType, fp.OSVersion, fp.KiroVersion)
 }
 
 // PrepareRequest prepares the HTTP request before execution.
@@ -745,7 +705,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin = resolveRequestOrigin(auth, endpointConfig.Origin)
+		currentOrigin = endpointConfig.Origin
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
@@ -772,6 +732,10 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 			if endpointConfig.AmzTarget != "" {
 				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 			}
+			// Kiro-specific headers
+			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
+
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
 
@@ -898,6 +862,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 				log.Warnf("kiro: received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 				if refreshErr != nil {
+					log.Errorf("kiro: token refresh failed: %v", refreshErr)
 					return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
@@ -965,6 +930,7 @@ func (e *KiroExecutor) executeWithRetry(ctx context.Context, auth *cliproxyauth.
 					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
 					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
 						// Token refresh failed - return error immediately
 						return resp, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 					}
@@ -1181,7 +1147,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 		endpointConfig := endpointConfigs[endpointIdx]
 		url := endpointConfig.URL
 		// Use this endpoint's compatible Origin (critical for avoiding 403 errors)
-		currentOrigin = resolveRequestOrigin(auth, endpointConfig.Origin)
+		currentOrigin = endpointConfig.Origin
 
 		// Rebuild payload with the correct origin for this endpoint
 		// Each endpoint requires its matching Origin value in the request body
@@ -1209,6 +1175,10 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 			if endpointConfig.AmzTarget != "" {
 				httpReq.Header.Set("X-Amz-Target", endpointConfig.AmzTarget)
 			}
+			// Kiro-specific headers
+			httpReq.Header.Set("x-amzn-kiro-agent-mode", kiroIDEAgentMode)
+			httpReq.Header.Set("x-amzn-codewhisperer-optout", "true")
+
 			// Apply dynamic fingerprint-based headers
 			applyDynamicFingerprint(httpReq, auth)
 
@@ -1334,6 +1304,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 				log.Warnf("kiro: stream received 401 error, attempting token refresh")
 				refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 				if refreshErr != nil {
+					log.Errorf("kiro: token refresh failed: %v", refreshErr)
 					return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 				}
 
@@ -1401,6 +1372,7 @@ func (e *KiroExecutor) executeStreamWithRetry(ctx context.Context, auth *cliprox
 					log.Warnf("kiro: 403 appears token-related, attempting token refresh")
 					refreshedAuth, refreshErr := e.Refresh(ctx, auth)
 					if refreshErr != nil {
+						log.Errorf("kiro: token refresh failed: %v", refreshErr)
 						// Token refresh failed - return error immediately
 						return nil, statusErr{code: httpResp.StatusCode, msg: string(respBody)}
 					}
@@ -1511,153 +1483,6 @@ func kiroCredentials(auth *cliproxyauth.Auth) (accessToken, profileArn string) {
 	return accessToken, profileArn
 }
 
-// findRealThinkingEndTag finds the real </thinking> end tag, skipping false positives.
-// Returns -1 if no real end tag is found.
-//
-// Real </thinking> tags from Kiro API have specific characteristics:
-// - Usually preceded by newline (.\n</thinking>)
-// - Usually followed by newline (\n\n)
-// - Not inside code blocks or inline code
-//
-// False positives (discussion text) have characteristics:
-// - In the middle of a sentence
-// - Preceded by discussion words like "标签", "tag", "returns"
-// - Inside code blocks or inline code
-//
-// Parameters:
-// - content: the content to search in
-// - alreadyInCodeBlock: whether we're already inside a code block from previous chunks
-// - alreadyInInlineCode: whether we're already inside inline code from previous chunks
-func findRealThinkingEndTag(content string, alreadyInCodeBlock, alreadyInInlineCode bool) int {
-	searchStart := 0
-	for {
-		endIdx := strings.Index(content[searchStart:], kirocommon.ThinkingEndTag)
-		if endIdx < 0 {
-			return -1
-		}
-		endIdx += searchStart // Adjust to absolute position
-
-		textBeforeEnd := content[:endIdx]
-		textAfterEnd := content[endIdx+len(kirocommon.ThinkingEndTag):]
-
-		// Check 1: Is it inside inline code?
-		// Count backticks in current content and add state from previous chunks
-		backtickCount := strings.Count(textBeforeEnd, "`")
-		effectiveInInlineCode := alreadyInInlineCode
-		if backtickCount%2 == 1 {
-			effectiveInInlineCode = !effectiveInInlineCode
-		}
-		if effectiveInInlineCode {
-			log.Debugf("kiro: found </thinking> inside inline code at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 2: Is it inside a code block?
-		// Count fences in current content and add state from previous chunks
-		fenceCount := strings.Count(textBeforeEnd, "```")
-		altFenceCount := strings.Count(textBeforeEnd, "~~~")
-		effectiveInCodeBlock := alreadyInCodeBlock
-		if fenceCount%2 == 1 || altFenceCount%2 == 1 {
-			effectiveInCodeBlock = !effectiveInCodeBlock
-		}
-		if effectiveInCodeBlock {
-			log.Debugf("kiro: found </thinking> inside code block at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 3: Real </thinking> tags are usually preceded by newline or at start
-		// and followed by newline or at end. Check the format.
-		charBeforeTag := byte(0)
-		if endIdx > 0 {
-			charBeforeTag = content[endIdx-1]
-		}
-		charAfterTag := byte(0)
-		if len(textAfterEnd) > 0 {
-			charAfterTag = textAfterEnd[0]
-		}
-
-		// Real end tag format: preceded by newline OR end of sentence (. ! ?)
-		// and followed by newline OR end of content
-		isPrecededByNewlineOrSentenceEnd := charBeforeTag == '\n' || charBeforeTag == '.' ||
-			charBeforeTag == '!' || charBeforeTag == '?' || charBeforeTag == 0
-		isFollowedByNewlineOrEnd := charAfterTag == '\n' || charAfterTag == 0
-
-		// If the tag has proper formatting (newline before/after), it's likely real
-		if isPrecededByNewlineOrSentenceEnd && isFollowedByNewlineOrEnd {
-			log.Debugf("kiro: found properly formatted </thinking> at pos %d", endIdx)
-			return endIdx
-		}
-
-		// Check 4: Is the tag preceded by discussion keywords on the same line?
-		lastNewlineIdx := strings.LastIndex(textBeforeEnd, "\n")
-		lineBeforeTag := textBeforeEnd
-		if lastNewlineIdx >= 0 {
-			lineBeforeTag = textBeforeEnd[lastNewlineIdx+1:]
-		}
-		lineBeforeTagLower := strings.ToLower(lineBeforeTag)
-
-		// Discussion patterns - if found, this is likely discussion text
-		discussionPatterns := []string{
-			"标签", "返回", "输出", "包含", "使用", "解析", "转换", "生成", // Chinese
-			"tag", "return", "output", "contain", "use", "parse", "emit", "convert", "generate", // English
-			"<thinking>",    // discussing both tags together
-			"`</thinking>`", // explicitly in inline code
-		}
-		isDiscussion := false
-		for _, pattern := range discussionPatterns {
-			if strings.Contains(lineBeforeTagLower, pattern) {
-				isDiscussion = true
-				break
-			}
-		}
-		if isDiscussion {
-			log.Debugf("kiro: found </thinking> after discussion text at pos %d, skipping", endIdx)
-			searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-			continue
-		}
-
-		// Check 5: Is there text immediately after on the same line?
-		// Real end tags don't have text immediately after on the same line
-		if len(textAfterEnd) > 0 && charAfterTag != '\n' && charAfterTag != 0 {
-			// Find the next newline
-			nextNewline := strings.Index(textAfterEnd, "\n")
-			var textOnSameLine string
-			if nextNewline >= 0 {
-				textOnSameLine = textAfterEnd[:nextNewline]
-			} else {
-				textOnSameLine = textAfterEnd
-			}
-			// If there's non-whitespace text on the same line after the tag, it's discussion
-			if strings.TrimSpace(textOnSameLine) != "" {
-				log.Debugf("kiro: found </thinking> with text after on same line at pos %d, skipping", endIdx)
-				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-				continue
-			}
-		}
-
-		// Check 6: Is there another <thinking> tag after this </thinking>?
-		if strings.Contains(textAfterEnd, kirocommon.ThinkingStartTag) {
-			nextStartIdx := strings.Index(textAfterEnd, kirocommon.ThinkingStartTag)
-			textBeforeNextStart := textAfterEnd[:nextStartIdx]
-			nextBacktickCount := strings.Count(textBeforeNextStart, "`")
-			nextFenceCount := strings.Count(textBeforeNextStart, "```")
-			nextAltFenceCount := strings.Count(textBeforeNextStart, "~~~")
-
-			// If the next <thinking> is NOT in code, then this </thinking> is discussion text
-			if nextBacktickCount%2 == 0 && nextFenceCount%2 == 0 && nextAltFenceCount%2 == 0 {
-				log.Debugf("kiro: found </thinking> followed by <thinking> at pos %d, likely discussion text, skipping", endIdx)
-				searchStart = endIdx + len(kirocommon.ThinkingEndTag)
-				continue
-			}
-		}
-
-		// This looks like a real end tag
-		return endIdx
-	}
-}
-
 // determineAgenticMode determines if the model is an agentic or chat-only variant.
 // Returns (isAgentic, isChatOnly) based on model name suffixes.
 func determineAgenticMode(model string) (isAgentic, isChatOnly bool) {
@@ -1689,200 +1514,105 @@ func getEffectiveProfileArnWithWarning(auth *cliproxyauth.Auth, profileArn strin
 	return profileArn
 }
 
-var defaultKiroModelMap = map[string]string{
-	// Amazon Q format (amazonq- prefix) - same API as Kiro
-	"amazonq-auto":                       "auto",
-	"amazonq-claude-opus-4-6":            "claude-opus-4.6",
-	"amazonq-claude-sonnet-4-6":          "claude-sonnet-4.6",
-	"amazonq-claude-opus-4-5":            "claude-opus-4.5",
-	"amazonq-claude-sonnet-4-5":          "claude-sonnet-4.5",
-	"amazonq-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-	"amazonq-claude-sonnet-4":            "claude-sonnet-4",
-	"amazonq-claude-sonnet-4-20250514":   "claude-sonnet-4",
-	"amazonq-claude-haiku-4-5":           "claude-haiku-4.5",
-	// Kiro format (kiro- prefix) - valid model names that should be preserved
-	"kiro-claude-opus-4-6":            "claude-opus-4.6",
-	"kiro-claude-sonnet-4-6":          "claude-sonnet-4.6",
-	"kiro-claude-opus-4-5":            "claude-opus-4.5",
-	"kiro-claude-sonnet-4-5":          "claude-sonnet-4.5",
-	"kiro-claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-	"kiro-claude-sonnet-4":            "claude-sonnet-4",
-	"kiro-claude-sonnet-4-20250514":   "claude-sonnet-4",
-	"kiro-claude-haiku-4-5":           "claude-haiku-4.5",
-	"kiro-deepseek-3-2":               "deepseek-3.2",
-	"kiro-minimax-m2-5":               "minimax-m2.5",
-	"kiro-minimax-m2-1":               "minimax-m2.1",
-	"kiro-glm-5":                      "glm-5",
-	"kiro-qwen3-coder-next":           "qwen3-coder-next",
-	"kiro-auto":                       "auto",
-	// Native format (no prefix) - used by Kiro IDE directly
-	"claude-opus-4-6":            "claude-opus-4.6",
-	"claude-opus-4.6":            "claude-opus-4.6",
-	"claude-sonnet-4-6":          "claude-sonnet-4.6",
-	"claude-sonnet-4.6":          "claude-sonnet-4.6",
-	"claude-opus-4-5":            "claude-opus-4.5",
-	"claude-opus-4.5":            "claude-opus-4.5",
-	"claude-haiku-4-5":           "claude-haiku-4.5",
-	"claude-haiku-4.5":           "claude-haiku-4.5",
-	"claude-sonnet-4-5":          "claude-sonnet-4.5",
-	"claude-sonnet-4-5-20250929": "claude-sonnet-4.5",
-	"claude-sonnet-4.5":          "claude-sonnet-4.5",
-	"claude-sonnet-4":            "claude-sonnet-4",
-	"claude-sonnet-4-20250514":   "claude-sonnet-4",
-	"deepseek-3-2":               "deepseek-3.2",
-	"minimax-m2-5":               "minimax-m2.5",
-	"minimax-m2-1":               "minimax-m2.1",
-	"glm-5":                      "glm-5",
-	"qwen3-coder-next":           "qwen3-coder-next",
-	"auto":                       "auto",
-}
-
-// mapModelToKiro maps external model names to Kiro model IDs.
-// Supports both Kiro and Amazon Q prefixes since they use the same API.
-// Agentic variants (-agentic suffix) map to the same backend model IDs.
+// mapModelToKiro maps external model names to Kiro backend model IDs.
+//
+// It accepts any of the surface forms clients use and returns the ID that
+// Kiro's API expects. The transformation is algorithmic so new models added
+// by Kiro (e.g. glm-5, deepseek-3.2, future releases) route correctly
+// without code changes:
+//
+//  1. Trim surrounding whitespace and lowercase.
+//  2. Strip the leading "kiro-" or "amazonq-" prefix if present.
+//  3. Strip the trailing "-agentic" suffix (agentic variants share the
+//     underlying backend ID; the agentic behavior is applied separately
+//     via determineAgenticMode).
+//  4. Normalize the version segment from dashes to dots — e.g.
+//     "claude-sonnet-4-5" → "claude-sonnet-4.5", "minimax-m2-1" →
+//     "minimax-m2.1". Only the last "-<digit>" pair is rewritten so
+//     identifiers like "qwen3-coder-next" pass through unchanged.
+//  5. Map a few historical dated aliases (e.g. "claude-sonnet-4-5-20250929")
+//     back to their canonical version.
+//
+// Unknown model names are returned as-is rather than silently remapped
+// to claude-sonnet-4.5 — passing the client's chosen model through lets
+// Kiro itself decide whether the ID is valid.
 func (e *KiroExecutor) mapModelToKiro(model string) string {
-	model = strings.TrimSpace(model)
+	original := model
+	m := strings.TrimSpace(model)
+	if m == "" {
+		return ""
+	}
+	m = strings.ToLower(m)
 
-	// Handle agentic and chat variants dynamically
-	baseModel := model
-	if strings.HasSuffix(model, "-agentic") {
-		baseModel = strings.TrimSuffix(model, "-agentic")
-	} else if strings.HasSuffix(model, "-chat") {
-		baseModel = strings.TrimSuffix(model, "-chat")
+	// 1. Strip known vendor prefixes.
+	for _, prefix := range []string{"kiro-", "amazonq-"} {
+		if strings.HasPrefix(m, prefix) {
+			m = strings.TrimPrefix(m, prefix)
+			break
+		}
 	}
 
-	if kiroID, ok := defaultKiroModelMap[baseModel]; ok {
-		return kiroID
+	// 2. Strip agentic suffix — agentic variants share the backend ID.
+	m = strings.TrimSuffix(m, "-agentic")
+
+	// 3. Collapse dated aliases (e.g. claude-sonnet-4-5-20250929) to the
+	//    canonical version. Only handles the common 8-digit date suffix.
+	m = trimKiroDateSuffix(m)
+
+	// 4. Normalize final version segment: last "-<digit>" pair becomes "."
+	//    e.g. "claude-sonnet-4-5" → "claude-sonnet-4.5", but "qwen3-coder-next"
+	//    is left alone because the final segment isn't a digit.
+	m = normalizeKiroVersion(m)
+
+	if m != original {
+		log.Debugf("kiro: mapped model '%s' to backend ID '%s'", original, m)
 	}
-
-	if strings.HasPrefix(model, "kiro-") {
-		if modelInfo := registry.LookupModelInfo(model, "kiro"); modelInfo != nil {
-			// Prefer explicit execution target from registry when present. This preserves
-			// fully-qualified upstream model IDs such as 'kiro-glm-5' that the Kiro API may expect.
-			if modelInfo.ExecutionTarget != "" {
-				log.Debugf("kiro: using registry execution target '%s' for model '%s'", modelInfo.ExecutionTarget, model)
-				return modelInfo.ExecutionTarget
-			}
-			// Fall back to registry ID only when it already looks like a backend ID
-			// (i.e. not a user-facing kiro-/amazonq- alias).
-			if modelInfo.ID != "" &&
-				!strings.HasPrefix(modelInfo.ID, "kiro-") &&
-				!strings.HasPrefix(modelInfo.ID, "amazonq-") {
-				log.Debugf("kiro: using registry ID '%s' for model '%s'", modelInfo.ID, model)
-				return modelInfo.ID
-			}
-			// If registry entry exists but no explicit target, infer backend format conservatively
-			if backendID := kiroBackendModelID(baseModel); backendID != "" {
-				log.Debugf("kiro: mapped registry model '%s' to backend ID '%s'", model, backendID)
-				return backendID
-			}
-		}
-
-		// No registry entry: infer backend format from the user-facing kiro-* alias.
-		if backendID := kiroBackendModelID(baseModel); backendID != "" {
-			log.Debugf("kiro: inferred backend ID '%s' for model '%s'", backendID, model)
-			return backendID
-		}
-		log.Debugf("kiro: passing model through unchanged for '%s'", model)
-		return model
-	}
-
-	// If a backend model ID is already provided directly (e.g. "glm-5"),
-	// forward it as-is instead of forcing a Claude fallback.
-	modelLower := strings.ToLower(model)
-	if !strings.HasPrefix(model, "amazonq-") &&
-		!strings.HasPrefix(model, "kiro-") &&
-		!strings.Contains(modelLower, "claude") &&
-		!strings.Contains(modelLower, "sonnet") &&
-		!strings.Contains(modelLower, "haiku") &&
-		!strings.Contains(modelLower, "opus") {
-		return model
-	}
-
-	// Smart fallback: try to infer model type from name patterns
-
-	// Check for Haiku variants
-	if strings.Contains(modelLower, "haiku") {
-		log.Debugf("kiro: unknown Haiku model '%s', mapping to claude-haiku-4.5", model)
-		return "claude-haiku-4.5"
-	}
-
-	// Check for Sonnet variants
-	if strings.Contains(modelLower, "sonnet") {
-		// Check for specific version patterns
-		if strings.Contains(modelLower, "3-7") || strings.Contains(modelLower, "3.7") {
-			log.Debugf("kiro: unknown Sonnet 3.7 model '%s', mapping to claude-3-7-sonnet-20250219", model)
-			return "claude-3-7-sonnet-20250219"
-		}
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Sonnet 4.6 model '%s', mapping to claude-sonnet-4.6", model)
-			return "claude-sonnet-4.6"
-		}
-		if strings.Contains(modelLower, "4-5") || strings.Contains(modelLower, "4.5") {
-			log.Debugf("kiro: unknown Sonnet 4.5 model '%s', mapping to claude-sonnet-4.5", model)
-			return "claude-sonnet-4.5"
-		}
-		// Default to Sonnet 4
-		log.Debugf("kiro: unknown Sonnet model '%s', mapping to claude-sonnet-4", model)
-		return "claude-sonnet-4"
-	}
-
-	// Check for Opus variants
-	if strings.Contains(modelLower, "opus") {
-		if strings.Contains(modelLower, "4-7") || strings.Contains(modelLower, "4.7") {
-			log.Debugf("kiro: unknown Opus 4.7 model '%s', mapping to claude-opus-4.7", model)
-			return "claude-opus-4.7"
-		}
-		if strings.Contains(modelLower, "4-6") || strings.Contains(modelLower, "4.6") {
-			log.Debugf("kiro: unknown Opus 4.6 model '%s', mapping to claude-opus-4.6", model)
-			return "claude-opus-4.6"
-		}
-		log.Debugf("kiro: unknown Opus model '%s', mapping to claude-opus-4.5", model)
-		return "claude-opus-4.5"
-	}
-
-	// Qwen models (Aliyun) - map to Kiro-compatible model IDs
-	if strings.Contains(modelLower, "qwen") {
-		// Qwen 3.6-plus and similar models
-		if strings.Contains(modelLower, "3.6") || strings.Contains(modelLower, "36") {
-			log.Debugf("kiro: Qwen 3.6 model '%s', mapping to qwen3.6-plus", model)
-			return model // Return as-is for Qwen models
-		}
-		// Other Qwen models
-		log.Debugf("kiro: Qwen model '%s', mapping to qwen-plus", model)
-		return model
-	}
-
-	// Final fallback to Sonnet 4.5 (most commonly used model)
-	log.Warnf("kiro: unknown model '%s', falling back to claude-sonnet-4.5", model)
-	return "claude-sonnet-4.5"
+	return m
 }
 
-func kiroBackendModelID(model string) string {
-	backendID := strings.TrimSpace(model)
-	if backendID == "" {
-		return ""
+// trimKiroDateSuffix removes a trailing "-YYYYMMDD" (8 digits) if present.
+// Used to collapse dated model IDs like "claude-sonnet-4-5-20250929" to
+// "claude-sonnet-4-5" before further normalization.
+func trimKiroDateSuffix(s string) string {
+	if len(s) < 9 || s[len(s)-9] != '-' {
+		return s
 	}
-	backendID = strings.TrimPrefix(backendID, "kiro-")
-	backendID = strings.TrimSuffix(backendID, "-agentic")
-	if backendID == "" {
-		return ""
-	}
-
-	var b strings.Builder
-	b.Grow(len(backendID))
-	for i := 0; i < len(backendID); i++ {
-		if backendID[i] == '-' && i > 0 && i < len(backendID)-1 {
-			prev := backendID[i-1]
-			next := backendID[i+1]
-			if prev >= '0' && prev <= '9' && next >= '0' && next <= '9' {
-				b.WriteByte('.')
-				continue
-			}
+	for i := len(s) - 8; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return s
 		}
-		b.WriteByte(backendID[i])
 	}
-	return b.String()
+	return s[:len(s)-9]
+}
+
+// normalizeKiroVersion converts a trailing "-<digit>" pair to a dot-separated
+// version. For example:
+//   - "claude-sonnet-4-5"   → "claude-sonnet-4.5"
+//   - "claude-opus-4-7"     → "claude-opus-4.7"
+//   - "minimax-m2-1"        → "minimax-m2.1" (the "m2" retains its digit)
+//   - "qwen3-coder-next"    → "qwen3-coder-next" (no trailing digit pair)
+//   - "glm-5"               → "glm-5" (only one digit segment; left alone)
+//
+// The rule: if the last dash-separated segment is all digits AND the
+// second-to-last segment ends with a digit, replace that last dash with a dot.
+func normalizeKiroVersion(s string) string {
+	lastDash := strings.LastIndex(s, "-")
+	if lastDash <= 0 || lastDash == len(s)-1 {
+		return s
+	}
+	tail := s[lastDash+1:]
+	for _, r := range tail {
+		if r < '0' || r > '9' {
+			return s
+		}
+	}
+	// Require the preceding character to be a digit — otherwise we'd rewrite
+	// "glm-5" into "glm.5" which isn't a backend ID Kiro recognizes.
+	prev := s[lastDash-1]
+	if prev < '0' || prev > '9' {
+		return s
+	}
+	return s[:lastDash] + "." + tail
 }
 
 // EventStreamError represents an Event Stream processing error
@@ -2576,7 +2306,7 @@ func (e *KiroExecutor) extractEventTypeFromBytes(headers []byte) string {
 }
 
 // NOTE: Response building functions moved to internal/translator/kiro/claude/kiro_claude_response.go
-// The executor now uses kiroclaude.BuildClaudeResponse() and kiroclaude.ExtractThinkingFromContent() instead
+// The executor now uses kiroclaude.BuildClaudeResponse() instead
 
 // streamToChannel converts AWS Event Stream to channel-based streaming.
 // Supports tool calling - emits tool_use content blocks when tools are used.
@@ -2619,15 +2349,18 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 	// IMPORTANT: This must persist across all TranslateStream calls
 	var translatorParam any
 
-	// Thinking mode state tracking - tag-based parsing for <thinking> tags in content
-	inThinkBlock := false                          // Whether we're currently inside a <thinking> block
+	// Thinking mode state tracking — thinking blocks arrive via reasoningContentEvent
 	isThinkingBlockOpen := false                   // Track if thinking content block SSE event is open
 	thinkingBlockIndex := -1                       // Index of the thinking content block
 	var accumulatedThinkingContent strings.Builder // Accumulate thinking content for token counting
-	hasOfficialReasoningEvent := false             // Disable tag parsing after official reasoning events appear
 
-	// Buffer for handling partial tag matches at chunk boundaries
-	var pendingContent strings.Builder // Buffer content that might be part of a tag
+	// Tag-based <thinking> parsing state (opt-in via kiro-extract-thinking-tag-enable).
+	// Only used when kirocommon.IsExtractThinkingTagEnabled() returns true.
+	// hasOfficialReasoningEvent disables tag parsing once a reasoningContentEvent
+	// arrives, since the official channel is authoritative.
+	inThinkBlock := false
+	hasOfficialReasoningEvent := false
+	var pendingContent strings.Builder // Buffers content that may be a partial tag at chunk boundary
 
 	// Pre-calculate input tokens from request if possible
 	// Kiro uses Claude format, so try Claude format first, then OpenAI format, then fallback
@@ -2725,10 +2458,6 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 				currentToolUse = nil
 			}
 
-			// DISABLED: Tag-based pending character flushing
-			// This code block was used for tag-based thinking detection which has been
-			// replaced by reasoningContentEvent handling. No pending tag chars to flush.
-			// Original code preserved in git history.
 			break
 		}
 
@@ -3050,88 +2779,21 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 					lastUsageUpdateTime = time.Now()
 				}
 
-				if hasOfficialReasoningEvent {
-					processText := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(contentDelta, kirocommon.ThinkingStartTag, ""), kirocommon.ThinkingEndTag, ""))
-					if processText != "" {
-						if !isTextBlockOpen {
-							contentBlockIndex++
-							isTextBlockOpen = true
-							blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
-							sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
-							for _, chunk := range sseData {
-								enqueueTranslatedSSE(out, chunk)
-							}
-						}
-						claudeEvent := kiroclaude.BuildClaudeStreamEvent(processText, contentBlockIndex)
-						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
-						for _, chunk := range sseData {
-							enqueueTranslatedSSE(out, chunk)
-						}
-					}
-					continue
-				}
+				// Tag-based <thinking> parsing (opt-in). Once the official
+				// reasoningContentEvent channel has been seen, fall through to
+				// the plain-text path and strip any stray tag strings.
+				if kirocommon.IsExtractThinkingTagEnabled() && !hasOfficialReasoningEvent {
+					// Combine buffered partial-tag bytes with the new delta.
+					pendingContent.WriteString(contentDelta)
+					processContent := pendingContent.String()
+					pendingContent.Reset()
 
-				// TAG-BASED THINKING PARSING: Parse <thinking> tags from content
-				// Combine pending content with new content for processing
-				pendingContent.WriteString(contentDelta)
-				processContent := pendingContent.String()
-				pendingContent.Reset()
-
-				// Process content looking for thinking tags
-				for len(processContent) > 0 {
-					if inThinkBlock {
-						// We're inside a thinking block, look for </thinking>
-						endIdx := strings.Index(processContent, kirocommon.ThinkingEndTag)
-						if endIdx >= 0 {
-							// Found end tag - emit thinking content before the tag
-							thinkingText := processContent[:endIdx]
-							if thinkingText != "" {
-								// Ensure thinking block is open
-								if !isThinkingBlockOpen {
-									contentBlockIndex++
-									thinkingBlockIndex = contentBlockIndex
-									isThinkingBlockOpen = true
-									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
-									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
-									for _, chunk := range sseData {
-										enqueueTranslatedSSE(out, chunk)
-									}
-								}
-								// Send thinking delta
-								thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkingText, thinkingBlockIndex)
-								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
-								for _, chunk := range sseData {
-									enqueueTranslatedSSE(out, chunk)
-								}
-								accumulatedThinkingContent.WriteString(thinkingText)
-							}
-							// Close thinking block
-							if isThinkingBlockOpen {
-								blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
-								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
-								for _, chunk := range sseData {
-									enqueueTranslatedSSE(out, chunk)
-								}
-								isThinkingBlockOpen = false
-							}
-							inThinkBlock = false
-							processContent = processContent[endIdx+len(kirocommon.ThinkingEndTag):]
-							log.Debugf("kiro: closed thinking block, remaining content: %d chars", len(processContent))
-						} else {
-							// No end tag found - check for partial match at end
-							partialMatch := false
-							for i := 1; i < len(kirocommon.ThinkingEndTag) && i <= len(processContent); i++ {
-								if strings.HasSuffix(processContent, kirocommon.ThinkingEndTag[:i]) {
-									// Possible partial tag at end, buffer it
-									pendingContent.WriteString(processContent[len(processContent)-i:])
-									processContent = processContent[:len(processContent)-i]
-									partialMatch = true
-									break
-								}
-							}
-							if !partialMatch || len(processContent) > 0 {
-								// Emit all as thinking content
-								if processContent != "" {
+					for len(processContent) > 0 {
+						if inThinkBlock {
+							endIdx := strings.Index(processContent, kirocommon.ThinkingEndTag)
+							if endIdx >= 0 {
+								thinkingText := processContent[:endIdx]
+								if thinkingText != "" {
 									if !isThinkingBlockOpen {
 										contentBlockIndex++
 										thinkingBlockIndex = contentBlockIndex
@@ -3142,24 +2804,13 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 											enqueueTranslatedSSE(out, chunk)
 										}
 									}
-									thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(processContent, thinkingBlockIndex)
+									thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(thinkingText, thinkingBlockIndex)
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
 									for _, chunk := range sseData {
 										enqueueTranslatedSSE(out, chunk)
 									}
-									accumulatedThinkingContent.WriteString(processContent)
+									accumulatedThinkingContent.WriteString(thinkingText)
 								}
-							}
-							processContent = ""
-						}
-					} else {
-						// Not in thinking block, look for <thinking>
-						startIdx := strings.Index(processContent, kirocommon.ThinkingStartTag)
-						if startIdx >= 0 {
-							// Found start tag - emit text content before the tag
-							textBefore := processContent[:startIdx]
-							if textBefore != "" {
-								// Close thinking block if open
 								if isThinkingBlockOpen {
 									blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
@@ -3168,50 +2819,53 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 									}
 									isThinkingBlockOpen = false
 								}
-								// Ensure text block is open
-								if !isTextBlockOpen {
-									contentBlockIndex++
-									isTextBlockOpen = true
-									blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
-									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
-									for _, chunk := range sseData {
-										enqueueTranslatedSSE(out, chunk)
+								inThinkBlock = false
+								processContent = processContent[endIdx+len(kirocommon.ThinkingEndTag):]
+							} else {
+								partialMatch := false
+								for i := 1; i < len(kirocommon.ThinkingEndTag) && i <= len(processContent); i++ {
+									if strings.HasSuffix(processContent, kirocommon.ThinkingEndTag[:i]) {
+										pendingContent.WriteString(processContent[len(processContent)-i:])
+										processContent = processContent[:len(processContent)-i]
+										partialMatch = true
+										break
 									}
 								}
-								// Send text delta
-								claudeEvent := kiroclaude.BuildClaudeStreamEvent(textBefore, contentBlockIndex)
-								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
-								for _, chunk := range sseData {
-									enqueueTranslatedSSE(out, chunk)
+								if !partialMatch || len(processContent) > 0 {
+									if processContent != "" {
+										if !isThinkingBlockOpen {
+											contentBlockIndex++
+											thinkingBlockIndex = contentBlockIndex
+											isThinkingBlockOpen = true
+											blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(thinkingBlockIndex, "thinking", "", "")
+											sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+											for _, chunk := range sseData {
+												enqueueTranslatedSSE(out, chunk)
+											}
+										}
+										thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(processContent, thinkingBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+										accumulatedThinkingContent.WriteString(processContent)
+									}
 								}
+								processContent = ""
 							}
-							// Close text block before entering thinking
-							if isTextBlockOpen {
-								blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
-								sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
-								for _, chunk := range sseData {
-									enqueueTranslatedSSE(out, chunk)
-								}
-								isTextBlockOpen = false
-							}
-							inThinkBlock = true
-							processContent = processContent[startIdx+len(kirocommon.ThinkingStartTag):]
-							log.Debugf("kiro: entered thinking block")
 						} else {
-							// No start tag found - check for partial match at end
-							partialMatch := false
-							for i := 1; i < len(kirocommon.ThinkingStartTag) && i <= len(processContent); i++ {
-								if strings.HasSuffix(processContent, kirocommon.ThinkingStartTag[:i]) {
-									// Possible partial tag at end, buffer it
-									pendingContent.WriteString(processContent[len(processContent)-i:])
-									processContent = processContent[:len(processContent)-i]
-									partialMatch = true
-									break
-								}
-							}
-							if !partialMatch || len(processContent) > 0 {
-								// Emit all as text content
-								if processContent != "" {
+							startIdx := strings.Index(processContent, kirocommon.ThinkingStartTag)
+							if startIdx >= 0 {
+								textBefore := processContent[:startIdx]
+								if textBefore != "" {
+									if isThinkingBlockOpen {
+										blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+										isThinkingBlockOpen = false
+									}
 									if !isTextBlockOpen {
 										contentBlockIndex++
 										isTextBlockOpen = true
@@ -3221,15 +2875,91 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 											enqueueTranslatedSSE(out, chunk)
 										}
 									}
-									claudeEvent := kiroclaude.BuildClaudeStreamEvent(processContent, contentBlockIndex)
+									claudeEvent := kiroclaude.BuildClaudeStreamEvent(textBefore, contentBlockIndex)
 									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
 									for _, chunk := range sseData {
 										enqueueTranslatedSSE(out, chunk)
 									}
 								}
+								if isTextBlockOpen {
+									blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
+									sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+									for _, chunk := range sseData {
+										enqueueTranslatedSSE(out, chunk)
+									}
+									isTextBlockOpen = false
+								}
+								inThinkBlock = true
+								processContent = processContent[startIdx+len(kirocommon.ThinkingStartTag):]
+							} else {
+								partialMatch := false
+								for i := 1; i < len(kirocommon.ThinkingStartTag) && i <= len(processContent); i++ {
+									if strings.HasSuffix(processContent, kirocommon.ThinkingStartTag[:i]) {
+										pendingContent.WriteString(processContent[len(processContent)-i:])
+										processContent = processContent[:len(processContent)-i]
+										partialMatch = true
+										break
+									}
+								}
+								if !partialMatch || len(processContent) > 0 {
+									if processContent != "" {
+										if !isTextBlockOpen {
+											contentBlockIndex++
+											isTextBlockOpen = true
+											blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+											sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+											for _, chunk := range sseData {
+												enqueueTranslatedSSE(out, chunk)
+											}
+										}
+										claudeEvent := kiroclaude.BuildClaudeStreamEvent(processContent, contentBlockIndex)
+										sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+										for _, chunk := range sseData {
+											enqueueTranslatedSSE(out, chunk)
+										}
+									}
+								}
+								processContent = ""
 							}
-							processContent = ""
 						}
+					}
+					continue
+				}
+
+				// Default path: treat content as plain text. Close thinking block
+				// before opening a text block to maintain valid Claude SSE structure.
+				if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
+					blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
+					}
+					isThinkingBlockOpen = false
+				}
+				if contentDelta != "" {
+					// When official reasoning events have been seen, strip any
+					// stray thinking tag strings so they don't leak into output.
+					emitText := contentDelta
+					if hasOfficialReasoningEvent {
+						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingStartTag, "")
+						emitText = strings.ReplaceAll(emitText, kirocommon.ThinkingEndTag, "")
+					}
+					if emitText == "" {
+						continue
+					}
+					if !isTextBlockOpen {
+						contentBlockIndex++
+						isTextBlockOpen = true
+						blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+						sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+						for _, chunk := range sseData {
+							enqueueTranslatedSSE(out, chunk)
+						}
+					}
+					claudeEvent := kiroclaude.BuildClaudeStreamEvent(emitText, contentBlockIndex)
+					sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+					for _, chunk := range sseData {
+						enqueueTranslatedSSE(out, chunk)
 					}
 				}
 			}
@@ -3319,6 +3049,8 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 			}
 
 			if thinkingText != "" {
+				// An official reasoning event arrived — disable tag-based parsing
+				// for the rest of this stream. The two channels must not interleave.
 				hasOfficialReasoningEvent = true
 				// Close text block if open before starting thinking block
 				if isTextBlockOpen && contentBlockIndex >= 0 {
@@ -3365,9 +3097,9 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 
 			// Emit completed tool uses
 			for _, tu := range completedToolUses {
-				// Skip truncated tools - don't emit fake marker tool_use
+				// Skip truncated tools when detector is enabled
 				if tu.IsTruncated {
-					log.Warnf("kiro: streamToChannel skipping truncated tool: %s (ID: %s)", tu.Name, tu.ToolUseID)
+					log.Warnf("kiro: skipping truncated tool: %s (ID: %s)", tu.Name, tu.ToolUseID)
 					continue
 				}
 
@@ -3589,7 +3321,48 @@ func (e *KiroExecutor) streamToChannel(ctx context.Context, body io.Reader, out 
 		}
 	}
 
-	// Close content block if open
+	// Flush any buffered partial-tag bytes as plain text. Only possible when
+	// tag parsing was enabled; otherwise pendingContent is always empty.
+	if pendingContent.Len() > 0 {
+		leftover := pendingContent.String()
+		pendingContent.Reset()
+		if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
+			thinkingEvent := kiroclaude.BuildClaudeThinkingDeltaEvent(leftover, thinkingBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, thinkingEvent, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
+			}
+			accumulatedThinkingContent.WriteString(leftover)
+		} else {
+			if !isTextBlockOpen {
+				contentBlockIndex++
+				isTextBlockOpen = true
+				blockStart := kiroclaude.BuildClaudeContentBlockStartEvent(contentBlockIndex, "text", "", "")
+				sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStart, &translatorParam)
+				for _, chunk := range sseData {
+					enqueueTranslatedSSE(out, chunk)
+				}
+			}
+			claudeEvent := kiroclaude.BuildClaudeStreamEvent(leftover, contentBlockIndex)
+			sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, claudeEvent, &translatorParam)
+			for _, chunk := range sseData {
+				enqueueTranslatedSSE(out, chunk)
+			}
+		}
+	}
+
+	// Close thinking block if still open at stream end
+	if isThinkingBlockOpen && thinkingBlockIndex >= 0 {
+		blockStop := kiroclaude.BuildClaudeThinkingBlockStopEvent(thinkingBlockIndex)
+		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
+		for _, chunk := range sseData {
+			enqueueTranslatedSSE(out, chunk)
+		}
+		isThinkingBlockOpen = false
+		log.Warnf("kiro: closed unclosed thinking block at stream end")
+	}
+
+	// Close text content block if open
 	if isTextBlockOpen && contentBlockIndex >= 0 {
 		blockStop := kiroclaude.BuildClaudeContentBlockStopEvent(contentBlockIndex)
 		sseData := sdktranslator.TranslateStream(ctx, sdktranslator.FromString("kiro"), targetFormat, model, originalReq, claudeBody, blockStop, &translatorParam)
@@ -3842,11 +3615,6 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 		// Builder ID refresh with default endpoint
 		log.Debugf("kiro executor: using SSO OIDC refresh for AWS Builder ID")
 		tokenData, err = ssoClient.RefreshToken(ctx, clientID, clientSecret, refreshToken)
-	case kiroauth.IsKiroCLIAuthMethod(authMethod):
-		// Native kiro-cli OAuth refresh path with Kiro-CLI User-Agent
-		log.Debugf("kiro executor: using native Kiro CLI refresh endpoint")
-		oauth := kiroauth.NewKiroCLIOAuth(e.cfg)
-		tokenData, err = oauth.RefreshToken(ctx, refreshToken)
 	default:
 		// Fallback to Kiro's OAuth refresh endpoint (for social auth: Google/GitHub)
 		log.Debugf("kiro executor: using Kiro OAuth refresh endpoint")
@@ -3873,9 +3641,7 @@ func (e *KiroExecutor) Refresh(ctx context.Context, auth *cliproxyauth.Auth) (*c
 	if tokenData.ProfileArn != "" {
 		updated.Metadata["profile_arn"] = tokenData.ProfileArn
 	}
-	if existingMethod, ok := updated.Metadata["auth_method"].(string); ok && kiroauth.IsKiroCLIAuthMethod(existingMethod) {
-		updated.Metadata["auth_method"] = "kiro-cli"
-	} else if tokenData.AuthMethod != "" {
+	if tokenData.AuthMethod != "" {
 		updated.Metadata["auth_method"] = tokenData.AuthMethod
 	}
 	if tokenData.Provider != "" {
@@ -4303,13 +4069,8 @@ func (h *webSearchHandler) setMcpHeaders(req *http.Request) {
 	req.Header.Set("Accept", "*/*")
 
 	// 2. Kiro-specific headers (aligned with GAR)
-	if isKiroCLIAuth(h.auth) {
-		req.Header.Del("x-amzn-kiro-agent-mode")
-		req.Header.Set("x-amzn-codewhisperer-optout", "false")
-	} else {
-		req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
-		req.Header.Set("x-amzn-codewhisperer-optout", "true")
-	}
+	req.Header.Set("x-amzn-kiro-agent-mode", "vibe")
+	req.Header.Set("x-amzn-codewhisperer-optout", "true")
 
 	// 3. User-Agent: Reuse applyDynamicFingerprint for consistency
 	applyDynamicFingerprint(req, h.auth)

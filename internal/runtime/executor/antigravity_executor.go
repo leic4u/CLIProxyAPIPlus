@@ -24,6 +24,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cache"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
@@ -514,7 +515,7 @@ func (e *AntigravityExecutor) Execute(ctx context.Context, auth *cliproxyauth.Au
 		auth = updatedAuth
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -551,14 +552,6 @@ attemptLoop:
 				err = errReq
 				return resp, err
 			}
-
-			log.WithFields(log.Fields{
-				"auth_id":  auth.ID,
-				"provider": e.Identifier(),
-				"model":    baseModel,
-				"url":      httpReq.URL.String(),
-				"method":   httpReq.Method,
-			}).Infof("external HTTP request: %s %s", httpReq.Method, httpReq.URL.String())
 
 			httpResp, errDo := httpClient.Do(httpReq)
 			if errDo != nil {
@@ -720,7 +713,7 @@ func (e *AntigravityExecutor) executeClaudeNonStream(ctx context.Context, auth *
 		auth = updatedAuth
 	}
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1181,7 +1174,7 @@ func (e *AntigravityExecutor) ExecuteStream(ctx context.Context, auth *cliproxya
 	}
 
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	translated := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 
 	translated, err = thinking.ApplyThinking(translated, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1452,7 +1445,7 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	}
 
 	// Prepare payload once (doesn't depend on baseURL)
-	payload := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	payload := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
 	payload, err := thinking.ApplyThinking(payload, req.Model, from.String(), to.String(), e.Identifier())
 	if err != nil {
@@ -1466,14 +1459,11 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 	baseURLs := antigravityBaseURLFallbackOrder(auth)
 	httpClient := newAntigravityHTTPClient(ctx, e.cfg, auth, 0)
 
-	var authID, authLabel, authType, authValue, authTier string
+	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
-		if tierID, ok := auth.Metadata["tier_id"].(string); ok {
-			authTier = tierID
-		}
 	}
 
 	var lastStatus int
@@ -1521,7 +1511,6 @@ func (e *AntigravityExecutor) CountTokens(ctx context.Context, auth *cliproxyaut
 			AuthLabel: authLabel,
 			AuthType:  authType,
 			AuthValue: authValue,
-			Tier:      authTier,
 		})
 
 		httpResp, errDo := httpClient.Do(httpReq)
@@ -1746,11 +1735,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 		return auth, errUnmarshal
 	}
 
-	// Preserve tier info before refresh
-	tierID, _ := auth.Metadata["tier_id"].(string)
-	tierName, _ := auth.Metadata["tier_name"].(string)
-	tierIsPaid, _ := auth.Metadata["tier_is_paid"].(bool)
-
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -1765,28 +1749,6 @@ func (e *AntigravityExecutor) refreshToken(ctx context.Context, auth *cliproxyau
 	auth.Metadata["type"] = antigravityAuthType
 	if errProject := e.ensureAntigravityProjectID(ctx, auth, tokenResp.AccessToken); errProject != nil {
 		log.Warnf("antigravity executor: ensure project id failed: %v", errProject)
-		log.Infof("antigravity executor: blocking auth %s for 30 minutes due to project id failure", auth.ID)
-		if auth.ModelStates == nil {
-			auth.ModelStates = make(map[string]*cliproxyauth.ModelState)
-		}
-		auth.ModelStates[""] = &cliproxyauth.ModelState{
-			Status:         cliproxyauth.StatusDisabled,
-			Unavailable:    true,
-			NextRetryAfter: time.Now().Add(30 * time.Minute),
-			UpdatedAt:      time.Now(),
-			LastError:      &cliproxyauth.Error{Code: "project_id_failed", Message: errProject.Error()},
-			StatusMessage:  "blocked due to project id failure",
-		}
-	}
-	// Restore preserved tier info
-	if tierID != "" {
-		auth.Metadata["tier_id"] = tierID
-	}
-	if tierName != "" {
-		auth.Metadata["tier_name"] = tierName
-	}
-	if tierIsPaid {
-		auth.Metadata["tier_is_paid"] = tierIsPaid
 	}
 	e.updateAntigravityCreditsBalance(ctx, auth, tokenResp.AccessToken)
 	return auth, nil
@@ -1798,7 +1760,17 @@ func antigravityOAuthClientValue(auth *cliproxyauth.Auth, key string, envName st
 			return value
 		}
 	}
-	return strings.TrimSpace(os.Getenv(envName))
+	if value := strings.TrimSpace(os.Getenv(envName)); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func (e *AntigravityExecutor) ensureAntigravityProjectID(ctx context.Context, auth *cliproxyauth.Auth, accessToken string) error {
@@ -1971,12 +1943,7 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		}
 	}
 	payload = geminiToAntigravity(modelName, payload, projectID)
-	resolvedModel := strings.TrimSpace(gjson.GetBytes(payload, "model").String())
-	if resolvedModel == "" {
-		resolvedModel = modelName
-	}
-	payload, _ = sjson.SetBytes(payload, "model", resolvedModel)
-	modelName = resolvedModel
+	payload, _ = sjson.SetBytes(payload, "model", modelName)
 
 	// Cap maxOutputTokens to model's max_completion_tokens from registry
 	if maxOut := gjson.GetBytes(payload, "request.generationConfig.maxOutputTokens"); maxOut.Exists() && maxOut.Type == gjson.Number {
@@ -2060,14 +2027,11 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 	}
 	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 
-	var authID, authLabel, authType, authValue, authTier string
+	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
-		if tierID, ok := auth.Metadata["tier_id"].(string); ok {
-			authTier = tierID
-		}
 	}
 	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       requestURL.String(),
@@ -2079,7 +2043,6 @@ func (e *AntigravityExecutor) buildRequest(ctx context.Context, auth *cliproxyau
 		AuthLabel: authLabel,
 		AuthType:  authType,
 		AuthValue: authValue,
-		Tier:      authTier,
 	})
 
 	return httpReq, nil

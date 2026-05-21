@@ -33,8 +33,6 @@ func (s *ConfigSynthesizer) Synthesize(ctx *SynthesisContext) ([]*coreauth.Auth,
 	out = append(out, s.synthesizeClaudeKeys(ctx)...)
 	// Codex API Keys
 	out = append(out, s.synthesizeCodexKeys(ctx)...)
-	// Ollama API Keys
-	out = append(out, s.synthesizeOllamaKeys(ctx)...)
 	// Kiro (AWS CodeWhisperer)
 	out = append(out, s.synthesizeKiroKeys(ctx)...)
 	// OpenAI-compat
@@ -72,9 +70,6 @@ func (s *ConfigSynthesizer) synthesizeGeminiKeys(ctx *SynthesisContext) []*corea
 		}
 		if entry.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(entry.Priority)
-		}
-		if entry.BillingClass != "" {
-			attrs["billing_class"] = string(entry.BillingClass)
 		}
 		if base != "" {
 			attrs["base_url"] = base
@@ -131,9 +126,6 @@ func (s *ConfigSynthesizer) synthesizeClaudeKeys(ctx *SynthesisContext) []*corea
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
-		if ck.BillingClass != "" {
-			attrs["billing_class"] = string(ck.BillingClass)
-		}
 		if base != "" {
 			attrs["base_url"] = base
 		}
@@ -189,9 +181,6 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if ck.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(ck.Priority)
 		}
-		if ck.BillingClass != "" {
-			attrs["billing_class"] = string(ck.BillingClass)
-		}
 		if ck.BaseURL != "" {
 			attrs["base_url"] = ck.BaseURL
 		}
@@ -219,57 +208,6 @@ func (s *ConfigSynthesizer) synthesizeCodexKeys(ctx *SynthesisContext) []*coreau
 		if len(a.Metadata) == 0 {
 			a.Metadata = nil
 		}
-		out = append(out, a)
-	}
-	return out
-}
-
-// synthesizeOllamaKeys creates Auth entries for Ollama Cloud API keys.
-func (s *ConfigSynthesizer) synthesizeOllamaKeys(ctx *SynthesisContext) []*coreauth.Auth {
-	cfg := ctx.Config
-	now := ctx.Now
-	idGen := ctx.IDGenerator
-
-	out := make([]*coreauth.Auth, 0, len(cfg.OllamaKey))
-	for i := range cfg.OllamaKey {
-		entry := cfg.OllamaKey[i]
-		key := strings.TrimSpace(entry.APIKey)
-		if key == "" {
-			continue
-		}
-		base := strings.TrimSpace(entry.BaseURL)
-		prefix := strings.TrimSpace(entry.Prefix)
-		proxyURL := strings.TrimSpace(entry.ProxyURL)
-		id, token := idGen.Next("ollama:apikey", key, base)
-		attrs := map[string]string{
-			"source":  fmt.Sprintf("config:ollama[%s]", token),
-			"api_key": key,
-		}
-		if base != "" {
-			attrs["base_url"] = base
-		}
-		if entry.Priority != 0 {
-			attrs["priority"] = strconv.Itoa(entry.Priority)
-		}
-		if entry.BillingClass != "" {
-			attrs["billing_class"] = string(entry.BillingClass)
-		}
-		if hash := diff.ComputeOllamaModelsHash(entry.Models); hash != "" {
-			attrs["models_hash"] = hash
-		}
-		addConfigHeadersToAttrs(entry.Headers, attrs)
-		a := &coreauth.Auth{
-			ID:         id,
-			Provider:   "ollama",
-			Label:      "ollama-apikey",
-			Prefix:     prefix,
-			Status:     coreauth.StatusActive,
-			ProxyURL:   proxyURL,
-			Attributes: attrs,
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		ApplyAuthExcludedModelsMeta(a, cfg, entry.ExcludedModels, "apikey")
 		out = append(out, a)
 	}
 	return out
@@ -316,9 +254,6 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
 			}
-			if compat.BillingClass != "" {
-				attrs["billing_class"] = string(compat.BillingClass)
-			}
 			if key != "" {
 				attrs["api_key"] = key
 			}
@@ -360,9 +295,6 @@ func (s *ConfigSynthesizer) synthesizeOpenAICompat(ctx *SynthesisContext) []*cor
 			}
 			if compat.Priority != 0 {
 				attrs["priority"] = strconv.Itoa(compat.Priority)
-			}
-			if compat.BillingClass != "" {
-				attrs["billing_class"] = string(compat.BillingClass)
 			}
 			if hash := diff.ComputeOpenAICompatModelsHash(compat.Models); hash != "" {
 				attrs["models_hash"] = hash
@@ -412,9 +344,6 @@ func (s *ConfigSynthesizer) synthesizeVertexCompat(ctx *SynthesisContext) []*cor
 		}
 		if compat.Priority != 0 {
 			attrs["priority"] = strconv.Itoa(compat.Priority)
-		}
-		if compat.BillingClass != "" {
-			attrs["billing_class"] = string(compat.BillingClass)
 		}
 		if key != "" {
 			attrs["api_key"] = key

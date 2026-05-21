@@ -145,7 +145,8 @@ func (h *Handler) DeleteLogs(c *gin.Context) {
 	})
 }
 
-// GetRequestErrorLogs lists error request log files.
+// GetRequestErrorLogs lists error request log files when RequestLog is disabled.
+// It returns an empty list when RequestLog is enabled.
 func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	if h == nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "handler unavailable"})
@@ -153,6 +154,10 @@ func (h *Handler) GetRequestErrorLogs(c *gin.Context) {
 	}
 	if h.cfg == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "configuration unavailable"})
+		return
+	}
+	if h.cfg.RequestLog {
+		c.JSON(http.StatusOK, gin.H{"files": []any{}})
 		return
 	}
 

@@ -12,11 +12,10 @@ import (
 // for OAuth2 flows to prevent CSRF attacks.
 //
 // Returns:
-//   - string: A 64-character hexadecimal encoded random state string (32 bytes)
+//   - string: A hexadecimal encoded random state string
 //   - error: An error if the random generation fails, nil otherwise
 func GenerateRandomState() (string, error) {
-	// Use 32 bytes to generate 64 hex characters, matching iFlow CLI's state format
-	bytes := make([]byte, 32)
+	bytes := make([]byte, 16)
 	if _, err := rand.Read(bytes); err != nil {
 		return "", fmt.Errorf("failed to generate random bytes: %w", err)
 	}

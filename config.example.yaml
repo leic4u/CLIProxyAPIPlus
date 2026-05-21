@@ -1,6 +1,6 @@
 # Server host/interface to bind to. Default is empty ("") to bind all interfaces (IPv4 + IPv6).
 # Use "127.0.0.1" or "localhost" to restrict access to local machine only.
-host: ""
+host: ''
 
 # Server port
 port: 8317
@@ -8,8 +8,8 @@ port: 8317
 # TLS settings for HTTPS. When enabled, the server listens with the provided certificate and key.
 tls:
   enable: false
-  cert: ""
-  key: ""
+  cert: ''
+  key: ''
 
 # Optional "home" control plane integration over Redis protocol.
 home:
@@ -40,7 +40,7 @@ remote-management:
   # Management key. If a plaintext value is provided here, it will be hashed on startup.
   # All management requests (even from localhost) require this key.
   # Leave empty to disable the Management API entirely (404 for all /v0/management routes).
-  secret-key: ""
+  secret-key: ''
 
   # Disable the bundled management control panel asset download and HTTP route when true.
   disable-control-panel: false
@@ -50,16 +50,16 @@ remote-management:
   # disable-auto-update-panel: false
 
   # GitHub repository for the management control panel. Accepts a repository URL or releases API URL.
-  panel-github-repository: "https://github.com/router-for-me/Cli-Proxy-API-Management-Center"
+  panel-github-repository: 'https://github.com/kaitranntt/Cli-Proxy-API-Management-Center'
 
 # Authentication directory (supports ~ for home directory)
-auth-dir: "~/.cli-proxy-api"
+auth-dir: '~/.cli-proxy-api'
 
 # API keys for authentication
 api-keys:
-  - "your-api-key-1"
-  - "your-api-key-2"
-  - "your-api-key-3"
+  - 'your-api-key-1'
+  - 'your-api-key-2'
+  - 'your-api-key-3'
 
 # Enable debug logging
 debug: false
@@ -67,10 +67,15 @@ debug: false
 # Enable pprof HTTP debug server (host:port). Keep it bound to localhost for safety.
 pprof:
   enable: false
-  addr: "127.0.0.1:8316"
+  addr: '127.0.0.1:8316'
 
 # When true, disable high-overhead HTTP middleware features to reduce per-request memory usage under high concurrency.
 commercial-mode: false
+
+# Open OAuth URLs in incognito/private browser mode.
+# Useful when you want to login with a different account without logging out from your current session.
+# Default: false (but Kiro auth defaults to true for multi-account support)
+incognito-browser: true
 
 # When true, write application logs to rotating files instead of stdout
 logging-to-file: false
@@ -123,6 +128,7 @@ disable-image-generation: false
 # Core auth auto-refresh worker pool size (OAuth/file-based auth token refresh).
 # When > 0, overrides the default worker count (16).
 # auth-auto-refresh-workers: 16
+
 # Quota exceeded behavior
 quota-exceeded:
   switch-project: true # Whether to automatically switch to another project when a quota is exceeded
@@ -132,7 +138,6 @@ quota-exceeded:
 # Routing strategy for selecting credentials when multiple match.
 routing:
   strategy: "round-robin" # round-robin (default), fill-first
-  mode: "" # "" (default): rotate per provider:model, "key-based": rotate per model only (ignores provider)
   # Enable universal session-sticky routing for all clients.
   # Session IDs are extracted from: metadata.user_id (Claude Code session format),
   # X-Session-ID, Session_id (Codex), X-Amp-Thread-Id (Amp CLI),
@@ -141,16 +146,9 @@ routing:
   session-affinity: false # default: false
   # How long session-to-auth bindings are retained. Default: 1h
   session-affinity-ttl: "1h"
-  # fallback-models:       # (optional) auto-fallback on 429/401/5xx errors (chat/completion only)
-  #   gpt-4o: claude-sonnet-4-20250514
-  #   opus: sonnet
-  # fallback-chain:        # (optional) general fallback chain for models not in fallback-models
-  #   - glm-4.7
-  #   - grok-code-fast-1
-  # fallback-max-depth: 3  # (optional) maximum fallback depth (default: 3)
 
 # When true, enable authentication for the WebSocket API (/v1/ws).
-ws-auth: false
+ws-auth: true
 
 # When true, enable Gemini CLI internal endpoints (/v1internal:*).
 # Default is false for safety.
@@ -300,6 +298,22 @@ nonstream-keepalive-interval: 0
 # Default: false.
 #kiro-system-prompt-inject-enable: true
 
+# Controls whether the heuristic truncation detector is applied to Kiro tool
+# use responses. When enabled, tool calls that appear truncated (invalid JSON,
+# missing required fields, suspiciously short content for write tools) are
+# silently skipped. The detector uses heuristic matching that can produce false
+# positives (e.g. code fence counting), so it is off by default.
+# Default: false.
+#kiro-truncation-detector-enable: true
+
+# Controls whether inline <thinking>...</thinking> tags in Kiro
+# assistantResponseEvent content are parsed into Claude thinking content
+# blocks. Kiro's official reasoning channel is reasoningContentEvent; the
+# tag-based path is unofficial and can false-positive when content literally
+# contains the tag string (code samples, discussion, XML fixtures), silently
+# truncating responses. Default: false.
+#kiro-extract-thinking-tag-enable: true
+
 # Kilocode (OAuth-based code assistant)
 # Note: Kilocode uses OAuth device flow authentication.
 # Use the CLI command: ./server --kilo-login
@@ -332,6 +346,7 @@ nonstream-keepalive-interval: 0
 #     models: # The models supported by the provider.
 #       - name: "moonshotai/kimi-k2:free" # The actual model name.
 #         alias: "kimi-k2"               # The alias used in the API.
+#         image: false                   # optional: set true to allow this model on /v1/images/generations and /v1/images/edits
 #         thinking:                      # optional: omit to default to levels ["low","medium","high"]
 #           levels: ["low", "medium", "high"]
 #       # You may repeat the same alias to build an internal model pool.
@@ -339,7 +354,7 @@ nonstream-keepalive-interval: 0
 #       # Requests to that alias will round-robin across the upstream names below,
 #       # and if the chosen upstream fails before producing output, the request will
 #       # continue with the next upstream model in the same alias pool.
-#       - name: "qwen3.5-plus"
+#       - name: "deepseek-v3.1"
 #         alias: "claude-opus-4.66"
 #       - name: "glm-5"
 #         alias: "claude-opus-4.66"
@@ -408,6 +423,21 @@ nonstream-keepalive-interval: 0
 # model/alias. For strict backend pinning, use unique aliases/prefixes or avoid overlapping names.
 # You can repeat the same name with different aliases to expose multiple client model names.
 # oauth-model-alias:
+#  antigravity:
+#    - name: "rev19-uic3-1p"
+#      alias: "gemini-2.5-computer-use-preview-10-2025"
+#    - name: "gemini-3-pro-image"
+#      alias: "gemini-3-pro-image-preview"
+#    - name: "gemini-3-pro-high"
+#      alias: "gemini-3-pro-preview"
+#    - name: "gemini-3-flash"
+#      alias: "gemini-3-flash-preview"
+#    - name: "claude-sonnet-4-5"
+#      alias: "gemini-claude-sonnet-4-5"
+#    - name: "claude-sonnet-4-5-thinking"
+#      alias: "gemini-claude-sonnet-4-5-thinking"
+#    - name: "claude-opus-4-5-thinking"
+#      alias: "gemini-claude-opus-4-5-thinking"
 #   gemini-cli:
 #     - name: "gemini-2.5-pro"          # original model name under this channel
 #       alias: "g2.5p"                  # client-visible alias
@@ -418,9 +448,6 @@ nonstream-keepalive-interval: 0
 #   aistudio:
 #     - name: "gemini-2.5-pro"
 #       alias: "g2.5p"
-#   antigravity:
-#     - name: "gemini-3-pro-high"
-#       alias: "gemini-3-pro-preview"
 #   claude:
 #     - name: "claude-sonnet-4-5-20250929"
 #       alias: "cs4.5"
@@ -435,6 +462,7 @@ nonstream-keepalive-interval: 0
 #       alias: "grok-latest"
 
 # OAuth provider excluded models
+# Supported channels: gemini-cli, vertex, aistudio, antigravity, claude, codex, qwen, iflow, kiro, github-copilot.
 # oauth-excluded-models:
 #   gemini-cli:
 #     - "gemini-2.5-pro"     # exclude specific models (exact match)

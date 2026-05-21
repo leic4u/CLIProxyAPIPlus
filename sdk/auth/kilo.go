@@ -6,8 +6,6 @@ import (
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kilo"
-	"github.com/router-for-me/CLIProxyAPI/v7/internal/browser"
-	log "github.com/sirupsen/logrus"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
@@ -40,35 +38,26 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		opts = &LoginOptions{}
 	}
 
-	kiloAuth := kilo.NewKiloAuth()
+	kilocodeAuth := kilo.NewKiloAuth()
 
 	fmt.Println("Initiating Kilo device authentication...")
-	resp, err := kiloAuth.InitiateDeviceFlow(ctx)
+	resp, err := kilocodeAuth.InitiateDeviceFlow(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initiate device flow: %w", err)
 	}
 
-	fmt.Printf("\nTo authenticate, please visit: %s\n", resp.VerificationURL)
-	fmt.Printf("And enter the code: %s\n\n", resp.Code)
-
-	// Try to open the browser automatically
-	if !opts.NoBrowser {
-		if browser.IsAvailable() {
-			if errOpen := browser.OpenURL(resp.VerificationURL); errOpen != nil {
-				log.Warnf("Failed to open browser automatically: %v", errOpen)
-			}
-		}
-	}
+	fmt.Printf("Please visit: %s\n", resp.VerificationURL)
+	fmt.Printf("And enter code: %s\n", resp.Code)
 
 	fmt.Println("Waiting for authorization...")
-	status, err := kiloAuth.PollForToken(ctx, resp.Code)
+	status, err := kilocodeAuth.PollForToken(ctx, resp.Code)
 	if err != nil {
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
 
 	fmt.Printf("Authentication successful for %s\n", status.UserEmail)
 
-	profile, err := kiloAuth.GetProfile(ctx, status.Token)
+	profile, err := kilocodeAuth.GetProfile(ctx, status.Token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch profile: %w", err)
 	}
@@ -101,7 +90,7 @@ func (a *KiloAuthenticator) Login(ctx context.Context, cfg *config.Config, opts 
 		orgID = profile.Orgs[0].ID
 	}
 
-	defaults, err := kiloAuth.GetDefaults(ctx, status.Token, orgID)
+	defaults, err := kilocodeAuth.GetDefaults(ctx, status.Token, orgID)
 	if err != nil {
 		fmt.Printf("Warning: failed to fetch defaults: %v\n", err)
 		defaults = &kilo.Defaults{}

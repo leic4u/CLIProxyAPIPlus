@@ -1,9 +1,5 @@
 # CLI Proxy API
 
-[![GitHub stars](https://img.shields.io/github/stars/HsnSaboor/CLIProxyAPIPlus?style=social)](https://github.com/HsnSaboor/CLIProxyAPIPlus/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/HsnSaboor/CLIProxyAPIPlus?style=social)](https://github.com/HsnSaboor/CLIProxyAPIPlus/network/members)
-[![License](https://img.shields.io/github/license/HsnSaboor/CLIProxyAPIPlus)](LICENSE)
-
 [English](README.md) | [中文](README_CN.md) | 日本語
 
 CLI向けのOpenAI/Gemini/Claude/Codex/Grok互換APIインターフェースを提供するプロキシサーバーです。
@@ -72,7 +68,9 @@ CLIProxyAPIガイド：[https://help.router-for.me/](https://help.router-for.me/
 
 ## 使用量統計
 
-v6.10.0以降、CLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。使用量統計が必要な場合は、次のプロジェクトをご利用ください：
+v6.10.0以降、上流のCLIProxyAPIおよび [CPAMC](https://github.com/router-for-me/Cli-Proxy-API-Management-Center) プロジェクトには使用量統計機能がプリセットされなくなりました。CLIProxyAPIPlusでは、使用量ロガーとメンテナンス版の [CPAMC dashboard fork](https://github.com/kaitranntt/Cli-Proxy-API-Management-Center) により、このワークフローを維持し、この管理パネルのリリースをデフォルトで使用します。
+
+外部の独立した使用量サービスが必要な場合は、次のプロジェクトをご利用ください：
 
 ### [CPA Usage Keeper](https://github.com/Willxup/cpa-usage-keeper)
 
@@ -227,7 +225,3 @@ OmniRouteはマルチプロバイダーLLM向けのAIゲートウェイです：
 ## ライセンス
 
 本プロジェクトはMITライセンスの下でライセンスされています - 詳細は[LICENSE](LICENSE)ファイルを参照してください。
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=HsnSaboor/CLIProxyAPIPlus&type=Date)](https://star-history.com/#HsnSaboor/CLIProxyAPIPlus&Date)

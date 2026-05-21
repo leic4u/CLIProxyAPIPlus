@@ -1,20 +1,8 @@
-# CLI 代理 API
+# CLIProxyAPI Plus
 
-[English](README.md) | 中文 | [日本語](README_JA.md)
+[English](README.md) | 中文
 
 一个为 CLI 提供 OpenAI/Gemini/Claude/Codex/Grok 兼容 API 接口的代理服务器。
-
-## Fork 特有功能
-
-此 fork 在上游 [jc01rho/CLIProxyAPIPlus](https://github.com/jc01rho/CLIProxyAPIPlus) 基础上添加了以下增强功能：
-
-- **Kiro CLI 原生 OAuth**：`--kiro-cli-login` 标志用于原生 Kiro CLI OAuth 流程，具有正确的指纹识别和遥测功能
-- **Kiro 改进**：令牌估算回退、tool_use.id 验证、OAuth 别名热重载、详细的 400 错误日志
-- **CodeBuddy 国际版支持**：`--codebuddy-intl-login` 标志用于 `www.codebuddy.ai` 端点（与国内端点分离）
-- **CodeBuddy 请求头修复**：添加了缺失的必需请求头（`x-request-id`、`x-github-api-version`）以确保 API 兼容性
-- **CodeBuddy 图像生成**：V2 端点转换和图像生成路由支持
-- **Cline OAuth 支持**：`--cline-login` 处理器，支持令牌刷新和 OpenRouter 兼容请求头
-- **公共安装脚本**：使用 GitHub releases 的跨平台安装器（无需编译 Go）
 
 现已支持通过 OAuth 登录接入 OpenAI Codex（GPT 系列）和 Claude Code。
 
@@ -157,7 +145,7 @@ CLIProxyAPI 已内置对 [Amp CLI](https://ampcode.com) 和 Amp IDE 扩展的支
 
 ## 贡献
 
-欢迎贡献！请随时提交 Pull Request。
+该项目仅接受第三方供应商支持的 Pull Request。任何非第三方供应商支持的 Pull Request 都将被拒绝。
 
 1. Fork 仓库
 2. 创建您的功能分支（`git checkout -b feature/amazing-feature`）
@@ -268,11 +256,3 @@ OmniRoute 是一个面向多供应商大语言模型的 AI 网关：它提供兼
 ## 许可证
 
 此项目根据 MIT 许可证授权 - 有关详细信息，请参阅 [LICENSE](LICENSE) 文件。
-
-## 写给所有中国网友的
-
-QQ 群：188637136（满）、1081218164
-
-或
-
-Telegram 群：https://t.me/CLIProxyAPI

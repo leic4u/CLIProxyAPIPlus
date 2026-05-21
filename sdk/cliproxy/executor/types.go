@@ -20,8 +20,6 @@ const DisallowFreeAuthMetadataKey = "disallow_free_auth"
 const (
 	// PinnedAuthMetadataKey locks execution to a specific auth ID.
 	PinnedAuthMetadataKey = "pinned_auth_id"
-	// EstimatedInputTokensMetadataKey stores a preflight estimated input token count.
-	EstimatedInputTokensMetadataKey = "estimated_input_tokens"
 	// SelectedAuthMetadataKey stores the auth ID selected by the scheduler.
 	SelectedAuthMetadataKey = "selected_auth_id"
 	// SelectedAuthCallbackMetadataKey carries an optional callback invoked with the selected auth ID.

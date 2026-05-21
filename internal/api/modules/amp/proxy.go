@@ -111,13 +111,11 @@ func createReverseProxy(upstreamURL string, secretSource SecretSource) (*httputi
 	proxy.ModifyResponse = func(resp *http.Response) error {
 		// Log upstream error responses for diagnostics (502, 503, etc.)
 		// These are NOT proxy connection errors - the upstream responded with an error status
-		method := "<unknown>"
-		path := "<unknown>"
+		method := ""
+		path := ""
 		if resp.Request != nil {
-			if resp.Request.Method != "" {
-				method = resp.Request.Method
-			}
-			if resp.Request.URL != nil && resp.Request.URL.Path != "" {
+			method = resp.Request.Method
+			if resp.Request.URL != nil {
 				path = resp.Request.URL.Path
 			}
 		}

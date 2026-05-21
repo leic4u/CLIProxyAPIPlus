@@ -18,6 +18,7 @@ var providerAppliers = map[string]ProviderApplier{
 	"codex":       nil,
 	"antigravity": nil,
 	"kimi":        nil,
+	"xai":         nil,
 }
 
 // GetProviderApplier returns the ProviderApplier for the given provider name.
@@ -62,7 +63,7 @@ func IsUserDefinedModel(modelInfo *registry.ModelInfo) bool {
 //   - body: Original request body JSON
 //   - model: Model name, optionally with thinking suffix (e.g., "claude-sonnet-4-5(16384)")
 //   - fromFormat: Source request format (e.g., openai, codex, gemini)
-//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi)
+//   - toFormat: Target provider format for the request body (gemini, gemini-cli, antigravity, claude, openai, codex, kimi, xai)
 //   - providerKey: Provider identifier used for registry model lookups (may differ from toFormat, e.g., openrouter -> openai)
 //
 // Returns:
@@ -324,7 +325,7 @@ func extractThinkingConfig(body []byte, provider string) ThinkingConfig {
 		return extractGeminiConfig(body, provider)
 	case "openai":
 		return extractOpenAIConfig(body)
-	case "codex":
+	case "codex", "xai":
 		return extractCodexConfig(body)
 	case "kimi":
 		// Kimi uses OpenAI-compatible reasoning_effort format
@@ -404,17 +405,11 @@ func extractClaudeConfig(body []byte) ThinkingConfig {
 //
 // Priority: thinkingLevel is checked first (Gemini 3 format), then thinkingBudget (Gemini 2.5 format).
 // This allows newer Gemini 3 level-based configs to take precedence.
-//
-// Note: If both thinkingLevel and thinkingBudget are present, only thinkingLevel is used.
-// This prevents the 400 error: "thinking_budget and thinking_level are not supported together"
 func extractGeminiConfig(body []byte, provider string) ThinkingConfig {
 	prefix := "generationConfig.thinkingConfig"
 	if provider == "gemini-cli" || provider == "antigravity" {
 		prefix = "request.generationConfig.thinkingConfig"
 	}
-
-	//levelExists := gjson.GetBytes(body, prefix+".thinkingLevel").Exists()
-	//budgetExists := gjson.GetBytes(body, prefix+".thinkingBudget").Exists()
 
 	// Check thinkingLevel first (Gemini 3 format takes precedence)
 	level := gjson.GetBytes(body, prefix+".thinkingLevel")

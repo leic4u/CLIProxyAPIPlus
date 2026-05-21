@@ -15,6 +15,9 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// OpenAIImageModelType marks models that are callable through OpenAI-compatible image endpoints.
+const OpenAIImageModelType = "openai-image"
+
 // ModelInfo represents information about an available model
 type ModelInfo struct {
 	// ID is the unique identifier for the model
@@ -62,9 +65,6 @@ type ModelInfo struct {
 	// array (e.g., openai-compatibility.*.models[], *-api-key.models[]).
 	// UserDefined models have thinking configuration passed through without validation.
 	UserDefined bool `json:"-"`
-
-	// ExecutionTarget marks alias-exposed models with their upstream execution ID.
-	ExecutionTarget string `json:"-"`
 }
 
 type availableModelsCacheEntry struct {
@@ -178,9 +178,6 @@ func LookupModelInfo(modelID string, provider ...string) *ModelInfo {
 	if info := GetGlobalRegistry().GetModelInfo(modelID, p); info != nil {
 		return cloneModelInfo(info)
 	}
-	if p != "" {
-		return cloneModelInfo(LookupStaticModelInfoForProvider(modelID, p))
-	}
 	return cloneModelInfo(LookupStaticModelInfo(modelID))
 }
 
@@ -253,8 +250,7 @@ func (r *ModelRegistry) RegisterClient(clientID, clientProvider string, models [
 		}
 		rawModelIDs = append(rawModelIDs, model.ID)
 		newCounts[model.ID]++
-		if existing, exists := newModels[model.ID]; exists {
-			newModels[model.ID] = preferClientModelInfo(existing, model)
+		if _, exists := newModels[model.ID]; exists {
 			continue
 		}
 		newModels[model.ID] = model
@@ -556,36 +552,20 @@ func cloneModelInfo(model *ModelInfo) *ModelInfo {
 	return &copyModel
 }
 
-func preferClientModelInfo(current, candidate *ModelInfo) *ModelInfo {
-	if current == nil {
-		return candidate
-	}
-	if candidate == nil {
-		return current
-	}
-	currentTarget := strings.TrimSpace(current.ExecutionTarget)
-	candidateTarget := strings.TrimSpace(candidate.ExecutionTarget)
-	if currentTarget != "" && candidateTarget == "" {
-		return candidate
-	}
-	return current
-}
-
 func cloneModelInfosUnique(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
 		return nil
 	}
 	cloned := make([]*ModelInfo, 0, len(models))
-	seen := make(map[string]int, len(models))
+	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		if model == nil || model.ID == "" {
 			continue
 		}
-		if idx, exists := seen[model.ID]; exists {
-			cloned[idx] = cloneModelInfo(preferClientModelInfo(cloned[idx], model))
+		if _, exists := seen[model.ID]; exists {
 			continue
 		}
-		seen[model.ID] = len(cloned)
+		seen[model.ID] = struct{}{}
 		cloned = append(cloned, cloneModelInfo(model))
 	}
 	return cloned

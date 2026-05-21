@@ -21,7 +21,6 @@ import (
 //   - "gemini" for Google's Gemini family
 //   - "codex" for OpenAI GPT-compatible providers
 //   - "claude" for Anthropic models
-//   - "qwen" for Alibaba's Qwen models
 //   - "openai-compatibility" for external OpenAI-compatible providers
 //
 // Parameters:
@@ -54,11 +53,7 @@ func GetProviderName(modelName string) []string {
 	}
 
 	if len(providers) > 0 {
-		// When both "claude" and an OpenAI-compatible provider are registered for the
-		// same model, prefer the OpenAI-compatible provider. Models explicitly configured
-		// as OpenAI-compatible must not be routed through the Claude executor, even when
-		// the claude provider has a higher credential count in the registry.
-		return preferOpenAICompatOverClaude(modelName, providers)
+		return providers
 	}
 
 	// Fallback: if cursor provider has registered models, route unknown models to it.
@@ -207,6 +202,7 @@ func MaskAuthorizationHeader(value string) string {
 //
 // Behavior by header key (case-insensitive):
 //   - "Authorization": Preserve the auth type prefix (e.g., "Bearer ") and mask only the credential part.
+//   - "Cookie", "Set-Cookie", and "Proxy-Authorization": Mask the entire value.
 //   - Headers containing "api-key": Mask the entire value using HideAPIKey.
 //   - Others: Return the original value unchanged.
 //
@@ -219,6 +215,10 @@ func MaskAuthorizationHeader(value string) string {
 func MaskSensitiveHeaderValue(key, value string) string {
 	lowerKey := strings.ToLower(strings.TrimSpace(key))
 	switch {
+	case lowerKey == "cookie",
+		lowerKey == "set-cookie",
+		lowerKey == "proxy-authorization":
+		return HideAPIKey(value)
 	case strings.Contains(lowerKey, "authorization"):
 		return MaskAuthorizationHeader(value)
 	case strings.Contains(lowerKey, "api-key"),
@@ -267,44 +267,6 @@ func MaskSensitiveQuery(raw string) string {
 		return raw
 	}
 	return strings.Join(parts, "&")
-}
-
-// preferOpenAICompatOverClaude returns providers with "claude" removed when any
-// other provider in the list serves the model with Type "openai-compatibility".
-// This prevents models explicitly configured as OpenAI-compatible from being
-// misrouted through the Claude executor when the claude provider has a higher
-// credential count in the registry.
-func preferOpenAICompatOverClaude(modelID string, providers []string) []string {
-	hasClaude := false
-	for _, p := range providers {
-		if strings.EqualFold(p, "claude") {
-			hasClaude = true
-			break
-		}
-	}
-	if !hasClaude {
-		return providers
-	}
-
-	reg := registry.GetGlobalRegistry()
-	for _, p := range providers {
-		if strings.EqualFold(p, "claude") {
-			continue
-		}
-		info := reg.GetModelInfo(modelID, p)
-		if info != nil && strings.EqualFold(strings.TrimSpace(info.Type), "openai-compatibility") {
-			filtered := make([]string, 0, len(providers)-1)
-			for _, provider := range providers {
-				if !strings.EqualFold(provider, "claude") {
-					filtered = append(filtered, provider)
-				}
-			}
-			if len(filtered) > 0 {
-				return filtered
-			}
-		}
-	}
-	return providers
 }
 
 func shouldMaskQueryParam(key string) bool {

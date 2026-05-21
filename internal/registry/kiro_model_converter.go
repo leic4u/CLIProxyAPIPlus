@@ -6,6 +6,8 @@ package registry
 import (
 	"strings"
 	"time"
+
+	kirocommon "github.com/router-for-me/CLIProxyAPI/v7/internal/translator/kiro/common"
 )
 
 // KiroAPIModel represents a model from Kiro API response.
@@ -86,8 +88,6 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 			// Use MaxInputTokens from API if available, otherwise use default
 			ContextLength:       getContextLength(km.MaxInputTokens),
 			MaxCompletionTokens: DefaultKiroMaxCompletionTokens,
-			// Raw model ID used by the executor for upstream routing
-			ExecutionTarget: km.ModelID,
 			// All Kiro models support thinking
 			Thinking: cloneThinkingSupport(DefaultKiroThinkingSupport),
 		}
@@ -99,16 +99,36 @@ func ConvertKiroAPIModels(kiroModels []*KiroAPIModel) []*ModelInfo {
 }
 
 // GenerateAgenticVariants creates -agentic variants for each model.
-// Agentic variants are optimized for coding agents with chunked writes.
+// Agentic variants are optimized for coding agents with chunked writes and
+// only make sense when Kiro system-prompt injection is enabled — the agentic
+// behavior is layered on top of the wrapped system prompt. If injection is
+// disabled (the default), variants are not generated and the input list is
+// returned unchanged so clients only see models that will actually behave
+// differently from their base counterparts.
 //
 // Parameters:
 //   - models: Base models to generate variants for
 //
 // Returns:
-//   - []*ModelInfo: Combined list of base models and their agentic variants
+//   - []*ModelInfo: Base models, plus agentic variants when injection is enabled.
 func GenerateAgenticVariants(models []*ModelInfo) []*ModelInfo {
 	if len(models) == 0 {
 		return nil
+	}
+
+	// Agentic variants are a no-op unless system-prompt injection is on.
+	// Without it, the "-agentic" suffix doesn't change backend behavior, so
+	// exposing both the base and the variant is just noise.
+	if !kirocommon.IsSystemPromptInjectEnabled() {
+		// Return a copy so callers don't mutate our input slice.
+		result := make([]*ModelInfo, 0, len(models))
+		for _, model := range models {
+			if model == nil {
+				continue
+			}
+			result = append(result, model)
+		}
+		return result
 	}
 
 	// Pre-allocate result with capacity for both base models and variants
@@ -143,7 +163,6 @@ func GenerateAgenticVariants(models []*ModelInfo) []*ModelInfo {
 			Description:         generateAgenticDescription(model.Description),
 			ContextLength:       model.ContextLength,
 			MaxCompletionTokens: model.MaxCompletionTokens,
-			ExecutionTarget:     model.ExecutionTarget,
 			Thinking:            cloneThinkingSupport(model.Thinking),
 		}
 
@@ -194,14 +213,8 @@ func MergeWithStaticMetadata(dynamicModels, staticModels []*ModelInfo) []*ModelI
 
 		// Check if static metadata exists for this model
 		if sm, exists := staticMap[dm.ID]; exists {
-			// Static metadata takes priority, but preserve ExecutionTarget from dynamic if static has none.
-			if sm.ExecutionTarget == "" && dm.ExecutionTarget != "" {
-				merged := cloneModelInfo(sm)
-				merged.ExecutionTarget = dm.ExecutionTarget
-				result = append(result, merged)
-			} else {
-				result = append(result, sm)
-			}
+			// Static metadata takes priority - use static model
+			result = append(result, sm)
 		} else {
 			// No static metadata - use dynamic model
 			result = append(result, dm)

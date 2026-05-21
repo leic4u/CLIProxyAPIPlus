@@ -2,25 +2,11 @@ package executor
 
 import (
 	"fmt"
-	"os"
-	"strings"
 	"testing"
 
 	kiroauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kiro"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 )
-
-func TestKiroExecutorDoesNotLogTokenRefreshFailuresAtErrorLevel(t *testing.T) {
-	source, err := os.ReadFile("kiro_executor.go")
-	if err != nil {
-		t.Fatalf("read kiro_executor.go: %v", err)
-	}
-
-	forbidden := `log.Errorf("kiro: token refresh failed:`
-	if strings.Contains(string(source), forbidden) {
-		t.Fatalf("kiro token refresh failures should be returned without duplicate error logs")
-	}
-}
 
 func TestBuildKiroEndpointConfigs(t *testing.T) {
 	tests := []struct {
@@ -469,9 +455,34 @@ func TestMapModelToKiro_MapsClaudeOpus47Variants(t *testing.T) {
 			expected: "claude-opus-4.7",
 		},
 		{
-			name:     "unknown opus 4.7 fallback",
-			model:    "partner-opus-4.7-preview",
-			expected: "claude-opus-4.7",
+			name:     "dated alias collapses to canonical version",
+			model:    "claude-sonnet-4-5-20250929",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "amazonq prefix",
+			model:    "amazonq-claude-sonnet-4-5",
+			expected: "claude-sonnet-4.5",
+		},
+		{
+			name:     "non-Claude model passes through",
+			model:    "kiro-glm-5",
+			expected: "glm-5",
+		},
+		{
+			name:     "non-Claude minimax versioned",
+			model:    "kiro-minimax-m2-5",
+			expected: "minimax-m2.5",
+		},
+		{
+			name:     "identifier without trailing version unchanged",
+			model:    "kiro-qwen3-coder-next",
+			expected: "qwen3-coder-next",
+		},
+		{
+			name:     "unknown model passes through unchanged",
+			model:    "kiro-future-model-9",
+			expected: "future-model-9",
 		},
 	}
 

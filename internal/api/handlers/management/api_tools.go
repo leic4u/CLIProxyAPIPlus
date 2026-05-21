@@ -14,6 +14,7 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 	"github.com/gin-gonic/gin"
+	antigravityauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/geminicli"
 	coreauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -429,8 +430,8 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		tokenURL = "https://oauth2.googleapis.com/token"
 	}
 	form := url.Values{}
-	clientID := oauthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
-	clientSecret := oauthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
+	clientID := antigravityOAuthClientValue(metadata, "client_id", antigravityOAuthClientIDEnv)
+	clientSecret := antigravityOAuthClientValue(metadata, "client_secret", antigravityOAuthClientSecretEnv)
 	if clientID == "" || clientSecret == "" {
 		return "", fmt.Errorf("antigravity oauth client credentials missing")
 	}
@@ -481,15 +482,6 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		return "", fmt.Errorf("antigravity oauth token refresh returned empty access_token")
 	}
 
-	// Preserve tier info before refresh
-	var tierID, tierName string
-	var tierIsPaid bool
-	if auth.Metadata != nil {
-		tierID, _ = auth.Metadata["tier_id"].(string)
-		tierName, _ = auth.Metadata["tier_name"].(string)
-		tierIsPaid, _ = auth.Metadata["tier_is_paid"].(bool)
-	}
-
 	if auth.Metadata == nil {
 		auth.Metadata = make(map[string]any)
 	}
@@ -504,17 +496,6 @@ func (h *Handler) refreshAntigravityOAuthAccessToken(ctx context.Context, auth *
 		auth.Metadata["expired"] = now.Add(time.Duration(tokenResp.ExpiresIn) * time.Second).Format(time.RFC3339)
 	}
 	auth.Metadata["type"] = "antigravity"
-
-	// Restore preserved tier info
-	if tierID != "" {
-		auth.Metadata["tier_id"] = tierID
-	}
-	if tierName != "" {
-		auth.Metadata["tier_name"] = tierName
-	}
-	if tierIsPaid {
-		auth.Metadata["tier_is_paid"] = tierIsPaid
-	}
 
 	if h != nil && h.authManager != nil {
 		auth.LastRefreshedAt = now
@@ -614,6 +595,20 @@ func oauthClientValue(metadata map[string]any, key string, envName string) strin
 		return value
 	}
 	return strings.TrimSpace(os.Getenv(envName))
+}
+
+func antigravityOAuthClientValue(metadata map[string]any, key string, envName string) string {
+	if value := oauthClientValue(metadata, key, envName); value != "" {
+		return value
+	}
+	switch envName {
+	case antigravityOAuthClientIDEnv:
+		return antigravityauth.DefaultClientID
+	case antigravityOAuthClientSecretEnv:
+		return antigravityauth.DefaultClientSecret
+	default:
+		return ""
+	}
 }
 
 func cloneMap(in map[string]any) map[string]any {

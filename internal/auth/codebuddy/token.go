@@ -30,8 +30,6 @@ type CodeBuddyTokenStorage struct {
 	Domain string `json:"domain"`
 	// UserID is the user ID associated with this token.
 	UserID string `json:"user_id"`
-	// Email is the email address associated with this token.
-	Email string `json:"email,omitempty"`
 	// Type indicates the authentication provider type, always "codebuddy" for this storage.
 	Type string `json:"type"`
 }
@@ -47,9 +45,7 @@ type CodeBuddyTokenStorage struct {
 //   - error: An error if the operation fails, nil otherwise
 func (s *CodeBuddyTokenStorage) SaveTokenToFile(authFilePath string) error {
 	misc.LogSavingCredentials(authFilePath)
-	if s.Type == "" {
-		s.Type = "codebuddy"
-	}
+	s.Type = "codebuddy"
 	if err := os.MkdirAll(filepath.Dir(authFilePath), 0700); err != nil {
 		return fmt.Errorf("failed to create directory: %w", err)
 	}

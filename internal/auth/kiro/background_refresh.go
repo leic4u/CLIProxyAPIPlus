@@ -2,7 +2,6 @@ package kiro
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"strings"
 	"sync"
@@ -59,7 +58,6 @@ type BackgroundRefresher struct {
 	stopCh           chan struct{}
 	wg               sync.WaitGroup
 	oauth            *KiroOAuth
-	cliOAuth         *KiroCLIOAuth
 	ssoClient        *SSOOIDCClient
 	callbackMu       sync.RWMutex                                   // 保护回调函数的并发访问
 	onTokenRefreshed func(tokenID string, tokenData *KiroTokenData) // 刷新成功回调
@@ -86,9 +84,6 @@ func WithConfig(cfg *config.Config) RefresherOption {
 	return func(r *BackgroundRefresher) {
 		r.oauth = NewKiroOAuth(cfg)
 		r.ssoClient = NewSSOOIDCClient(cfg)
-		r.callbackMu.Lock()
-		r.cliOAuth = NewKiroCLIOAuth(cfg)
-		r.callbackMu.Unlock()
 	}
 }
 
@@ -188,14 +183,6 @@ func (r *BackgroundRefresher) refreshSingle(ctx context.Context, token *Token) {
 				token.ClientSecret,
 				token.RefreshToken,
 			)
-		case "kiro-cli":
-			r.callbackMu.RLock()
-			cliOAuth := r.cliOAuth
-			r.callbackMu.RUnlock()
-			if cliOAuth == nil {
-				return nil, fmt.Errorf("kiro-cli refresh requested but cli oauth is not initialized")
-			}
-			return cliOAuth.RefreshToken(ctx, token.RefreshToken)
 		default:
 			return r.oauth.RefreshTokenWithFingerprint(ctx, token.RefreshToken, token.ID)
 		}

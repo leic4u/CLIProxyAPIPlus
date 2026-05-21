@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"io"
 	"net/http"
@@ -12,12 +11,10 @@ import (
 
 	copilotauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
-	intlogging "github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
-	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 )
 
@@ -68,41 +65,6 @@ func TestGitHubCopilotNormalizeModel_StripsSuffix(t *testing.T) {
 	}
 }
 
-func TestGitHubCopilotLogUpstreamErrorUsesDetailedWarnWithAuthAndModels(t *testing.T) {
-	originalOutput := log.StandardLogger().Out
-	originalFormatter := log.StandardLogger().Formatter
-	originalLevel := log.StandardLogger().Level
-	defer func() {
-		log.SetOutput(originalOutput)
-		log.SetFormatter(originalFormatter)
-		log.SetLevel(originalLevel)
-	}()
-
-	var buf bytes.Buffer
-	log.SetOutput(&buf)
-	log.SetFormatter(&log.TextFormatter{DisableTimestamp: true, DisableLevelTruncation: true})
-	log.SetLevel(log.WarnLevel)
-
-	e := NewGitHubCopilotExecutor(&config.Config{})
-	ctx := intlogging.WithRequestID(context.Background(), "copilot-test")
-	auth := &cliproxyauth.Auth{ID: "auth-1", Label: "work", Provider: "github-copilot"}
-	e.logUpstreamError(ctx, auth, "claude-sonnet-4-6", []byte(`{"model":"claude-sonnet-4.6","messages":[]}`), "https://api.githubcopilot.com/chat/completions", http.StatusBadRequest, "application/json", []byte(`{"error":{"message":"The requested model is not supported.","code":"model_not_supported"}}`))
-
-	output := buf.String()
-	for _, want := range []string{
-		"github-copilot:work model=claude-sonnet-4.6 requested_model=claude-sonnet-4-6",
-		"Status: 400",
-		"Request:",
-		"Response:",
-		"model_not_supported",
-		"request_id=copilot-test",
-	} {
-		if !strings.Contains(output, want) {
-			t.Fatalf("expected log to contain %q, got: %s", want, output)
-		}
-	}
-}
-
 func TestUseGitHubCopilotResponsesEndpoint_OpenAIResponseSource(t *testing.T) {
 	t.Parallel()
 	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai-response"), "claude-3-5-sonnet") {
@@ -117,8 +79,18 @@ func TestUseGitHubCopilotResponsesEndpoint_CodexModel(t *testing.T) {
 	}
 }
 
+func TestUseGitHubCopilotResponsesEndpoint_RegistryResponsesOnlyModel(t *testing.T) {
+	// Not parallel: shares global model registry with DynamicRegistryWinsOverStatic.
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4") {
+		t.Fatal("expected responses-only registry model to use /responses")
+	}
+	if !useGitHubCopilotResponsesEndpoint(sdktranslator.FromString("openai"), "gpt-5.4-mini") {
+		t.Fatal("expected responses-only registry model to use /responses")
+	}
+}
+
 func TestUseGitHubCopilotResponsesEndpoint_DynamicRegistryWinsOverStatic(t *testing.T) {
-	// Not parallel: mutates global model registry.
+	// Not parallel: mutates global model registry, conflicts with RegistryResponsesOnlyModel.
 
 	reg := registry.GetGlobalRegistry()
 	clientID := "github-copilot-test-client"
@@ -323,13 +295,19 @@ func TestTranslateGitHubCopilotResponsesStreamToClaude_TextLifecycle(t *testing.
 	}
 
 	delta := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.output_text.delta","delta":"he"}`), &param)
-	joinedDelta := string(bytes.Join(delta, nil))
+	var joinedDelta string
+	for _, d := range delta {
+		joinedDelta += string(d)
+	}
 	if !strings.Contains(joinedDelta, "content_block_start") || !strings.Contains(joinedDelta, "text_delta") {
 		t.Fatalf("delta events = %#v, want content_block_start + text_delta", delta)
 	}
 
 	completed := translateGitHubCopilotResponsesStreamToClaude([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":7,"output_tokens":9}}}`), &param)
-	joinedCompleted := string(bytes.Join(completed, nil))
+	var joinedCompleted string
+	for _, c := range completed {
+		joinedCompleted += string(c)
+	}
 	if !strings.Contains(joinedCompleted, "message_delta") || !strings.Contains(joinedCompleted, "message_stop") {
 		t.Fatalf("completed events = %#v, want message_delta + message_stop", completed)
 	}
@@ -645,44 +623,6 @@ func TestCountTokens_ClaudeSourceFormatTranslates(t *testing.T) {
 	}
 }
 
-func TestKiroMapModelToKiro_DynamicModelsUseBackendVersionFormat(t *testing.T) {
-	t.Parallel()
-
-	e := &KiroExecutor{}
-	tests := map[string]string{
-		"kiro-glm-5":                    "glm-5",
-		"kiro-glm-5-0":                  "glm-5.0",
-		"kiro-claude-sonnet-4-5":        "claude-sonnet-4.5",
-		"kiro-claude-haiku-4-5-agentic": "claude-haiku-4.5",
-	}
-	for modelID, want := range tests {
-		if got := e.mapModelToKiro(modelID); got != want {
-			t.Fatalf("mapModelToKiro(%q) = %q, want %q", modelID, got, want)
-		}
-	}
-}
-
-func TestGitHubCopilotAllowsOnlySupportedDynamicModels(t *testing.T) {
-	t.Parallel()
-
-	for _, modelID := range []string{
-		"claude-haiku-4.5",
-		"gemini-2.5-pro",
-		"gemini-3-pro-preview",
-		"gemini-3.1-pro-preview",
-		"gemini-3-flash-preview",
-	} {
-		if !registry.IsAllowedGitHubCopilotModel(modelID) {
-			t.Fatalf("expected %s to be allowed for GitHub Copilot dynamic model discovery", modelID)
-		}
-	}
-	for _, modelID := range []string{"gpt-5.5", "claude-sonnet-4.6"} {
-		if registry.IsAllowedGitHubCopilotModel(modelID) {
-			t.Fatalf("expected unsupported Copilot model %s to be hidden", modelID)
-		}
-	}
-}
-
 func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 	t.Parallel()
 
@@ -705,7 +645,7 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 		gotInitiator = r.Header.Get("X-Initiator")
 		gotBody, _ = io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"chatcmpl_1","object":"chat.completion","created":1,"model":"claude-sonnet-4.6","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","model":"claude-sonnet-4.6","role":"assistant","content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer server.Close()
 
@@ -729,11 +669,11 @@ func TestGitHubCopilotExecute_ClaudeModelUsesNativeGateway(t *testing.T) {
 		t.Fatalf("Execute() error: %v", err)
 	}
 
-	if gotPath != "/chat/completions" {
-		t.Fatalf("path = %q, want %q", gotPath, "/chat/completions")
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/messages")
 	}
-	if gotQuery != "" {
-		t.Fatalf("query = %q, want empty", gotQuery)
+	if gotQuery != "beta=true" {
+		t.Fatalf("query = %q, want %q", gotQuery, "beta=true")
 	}
 	if gotAuth != "Bearer copilot-api-token" {
 		t.Fatalf("Authorization = %q, want %q", gotAuth, "Bearer copilot-api-token")
@@ -770,9 +710,12 @@ func TestGitHubCopilotExecuteStream_ClaudeModelUsesNativeGateway(t *testing.T) {
 		gotInitiator = r.Header.Get("X-Initiator")
 		gotAPIVersion = r.Header.Get("X-Github-Api-Version")
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"claude-sonnet-4.6\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n"))
-		_, _ = w.Write([]byte("data: {\"id\":\"chatcmpl_1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"claude-sonnet-4.6\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"))
-		_, _ = w.Write([]byte("data: [DONE]\n\n"))
+		_, _ = w.Write([]byte("event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4.6\",\"content\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":0}}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n"))
+		_, _ = w.Write([]byte("event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n"))
+		_, _ = w.Write([]byte("event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"))
+		_, _ = w.Write([]byte("event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 	}))
 	defer server.Close()
 
@@ -804,8 +747,8 @@ func TestGitHubCopilotExecuteStream_ClaudeModelUsesNativeGateway(t *testing.T) {
 		joined.Write(chunk.Payload)
 	}
 
-	if gotPath != "/chat/completions" {
-		t.Fatalf("path = %q, want %q", gotPath, "/chat/completions")
+	if gotPath != "/v1/messages" {
+		t.Fatalf("path = %q, want %q", gotPath, "/v1/messages")
 	}
 	if gotInitiator != "agent" {
 		t.Fatalf("X-Initiator = %q, want %q", gotInitiator, "agent")
@@ -817,6 +760,7 @@ func TestGitHubCopilotExecuteStream_ClaudeModelUsesNativeGateway(t *testing.T) {
 		t.Fatalf("stream = %q, want Claude SSE payload", joined.String())
 	}
 }
+
 func TestCountTokens_EmptyPayload(t *testing.T) {
 	t.Parallel()
 	e := &GitHubCopilotExecutor{}

@@ -10,13 +10,13 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"runtime"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	iflowauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/iflow"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/runtime/executor/helps"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
@@ -29,8 +29,7 @@ import (
 
 const (
 	iflowDefaultEndpoint = "/chat/completions"
-	// iflowUserAgentPrefix matches the official iFlow CLI format: iFlowCLI/0.5.14
-	iflowUserAgentPrefix = "iFlowCLI/0.5.14"
+	iflowUserAgent       = "iFlow-Cli"
 )
 
 // IFlowExecutor executes OpenAI-compatible chat completions against the iFlow API using API keys derived from OAuth.
@@ -68,7 +67,7 @@ func (e *IFlowExecutor) HttpRequest(ctx context.Context, auth *cliproxyauth.Auth
 	if err := e.PrepareRequest(httpReq, auth); err != nil {
 		return nil, err
 	}
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	return httpClient.Do(httpReq)
 }
 
@@ -88,8 +87,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -99,7 +98,7 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, false)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
@@ -108,8 +107,8 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 	}
 
 	body = preserveReasoningContentInMessages(body)
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, "")
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -118,13 +117,18 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		return resp, err
 	}
 	applyIFlowHeaders(httpReq, apiKey, false)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       endpoint,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -136,10 +140,10 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
 	defer func() {
@@ -147,25 +151,25 @@ func (e *IFlowExecutor) Execute(ctx context.Context, auth *cliproxyauth.Auth, re
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
 	}()
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		b, _ := io.ReadAll(httpResp.Body)
-		appendAPIResponseChunk(ctx, e.cfg, b)
-		log.Debugf("iflow request error: status %d body %s", httpResp.StatusCode, summarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
+		helps.AppendAPIResponseChunk(ctx, e.cfg, b)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), b))
 		err = statusErr{code: httpResp.StatusCode, msg: string(b)}
 		return resp, err
 	}
 
 	data, err := io.ReadAll(httpResp.Body)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return resp, err
 	}
-	appendAPIResponseChunk(ctx, e.cfg, data)
-	reporter.publish(ctx, parseOpenAIUsage(data))
+	helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+	reporter.Publish(ctx, helps.ParseOpenAIUsage(data))
 	// Ensure usage is recorded even if upstream omits usage metadata.
-	reporter.ensurePublished(ctx)
+	reporter.EnsurePublished(ctx)
 
 	var param any
 	// Note: TranslateNonStream uses req.Model (original with suffix) to preserve
@@ -191,8 +195,8 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		baseURL = iflowauth.DefaultAPIBaseURL
 	}
 
-	reporter := newUsageReporter(ctx, e.Identifier(), baseModel, auth)
-	defer reporter.trackFailure(ctx, &err)
+	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	defer reporter.TrackFailure(ctx, &err)
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
@@ -202,7 +206,7 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 	originalPayload := originalPayloadSource
 	originalTranslated := sdktranslator.TranslateRequest(from, to, baseModel, originalPayload, true)
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), true)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, true)
 	body, _ = sjson.SetBytes(body, "model", baseModel)
 
 	body, err = thinking.ApplyThinking(body, req.Model, from.String(), "iflow", e.Identifier())
@@ -211,13 +215,13 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 	}
 
 	body = preserveReasoningContentInMessages(body)
-	// Ensure tools array exists to avoid provider quirks similar to Qwen's behaviour.
+	// Ensure tools array exists to avoid provider quirks observed in some upstreams.
 	toolsResult := gjson.GetBytes(body, "tools")
 	if toolsResult.Exists() && toolsResult.IsArray() && len(toolsResult.Array()) == 0 {
 		body = ensureToolsArray(body)
 	}
-	requestedModel := payloadRequestedModel(opts, req.Model)
-	body = applyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel)
+	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
+	body = helps.ApplyPayloadConfigWithRoot(e.cfg, baseModel, to.String(), "", body, originalTranslated, requestedModel, "")
 
 	endpoint := strings.TrimSuffix(baseURL, "/") + iflowDefaultEndpoint
 
@@ -226,13 +230,18 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		return nil, err
 	}
 	applyIFlowHeaders(httpReq, apiKey, true)
+	var attrs map[string]string
+	if auth != nil {
+		attrs = auth.Attributes
+	}
+	util.ApplyCustomHeadersFromAttrs(httpReq, attrs)
 	var authID, authLabel, authType, authValue string
 	if auth != nil {
 		authID = auth.ID
 		authLabel = auth.Label
 		authType, authValue = auth.AccountInfo()
 	}
-	recordAPIRequest(ctx, e.cfg, upstreamRequestLog{
+	helps.RecordAPIRequest(ctx, e.cfg, helps.UpstreamRequestLog{
 		URL:       endpoint,
 		Method:    http.MethodPost,
 		Headers:   httpReq.Header.Clone(),
@@ -244,24 +253,22 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		AuthValue: authValue,
 	})
 
-	httpClient := newProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
+	httpClient := helps.NewProxyAwareHTTPClient(ctx, e.cfg, auth, 0)
 	httpResp, err := httpClient.Do(httpReq)
 	if err != nil {
-		recordAPIResponseError(ctx, e.cfg, err)
+		helps.RecordAPIResponseError(ctx, e.cfg, err)
 		return nil, err
 	}
 
-	recordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
+	helps.RecordAPIResponseMetadata(ctx, e.cfg, httpResp.StatusCode, httpResp.Header.Clone())
 	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 		data, _ := io.ReadAll(httpResp.Body)
 		if errClose := httpResp.Body.Close(); errClose != nil {
 			log.Errorf("iflow executor: close response body error: %v", errClose)
 		}
-		appendAPIResponseChunk(ctx, e.cfg, data)
-		bodyStr := string(data)
-		summary := summarizeErrorBody(httpResp.Header.Get("Content-Type"), data)
-		log.Errorf("iflow streaming error: status %d, summary: %s, full body: %s", httpResp.StatusCode, summary, bodyStr)
-		err = statusErr{code: httpResp.StatusCode, msg: bodyStr}
+		helps.AppendAPIResponseChunk(ctx, e.cfg, data)
+		helps.LogWithRequestID(ctx).Debugf("request error, error status: %d error message: %s", httpResp.StatusCode, helps.SummarizeErrorBody(httpResp.Header.Get("Content-Type"), data))
+		err = statusErr{code: httpResp.StatusCode, msg: string(data)}
 		return nil, err
 	}
 
@@ -279,9 +286,9 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 		var param any
 		for scanner.Scan() {
 			line := scanner.Bytes()
-			appendAPIResponseChunk(ctx, e.cfg, line)
-			if detail, ok := parseOpenAIStreamUsage(line); ok {
-				reporter.publish(ctx, detail)
+			helps.AppendAPIResponseChunk(ctx, e.cfg, line)
+			if detail, ok := helps.ParseOpenAIStreamUsage(line); ok {
+				reporter.Publish(ctx, detail)
 			}
 			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, body, bytes.Clone(line), &param)
 			for i := range chunks {
@@ -289,12 +296,12 @@ func (e *IFlowExecutor) ExecuteStream(ctx context.Context, auth *cliproxyauth.Au
 			}
 		}
 		if errScan := scanner.Err(); errScan != nil {
-			recordAPIResponseError(ctx, e.cfg, errScan)
-			reporter.publishFailure(ctx)
+			helps.RecordAPIResponseError(ctx, e.cfg, errScan)
+			reporter.PublishFailure(ctx)
 			out <- cliproxyexecutor.StreamChunk{Err: errScan}
 		}
 		// Guarantee a usage record exists even if the stream never emitted usage data.
-		reporter.ensurePublished(ctx)
+		reporter.EnsurePublished(ctx)
 	}()
 
 	return &cliproxyexecutor.StreamResult{Headers: httpResp.Header.Clone(), Chunks: out}, nil
@@ -305,19 +312,19 @@ func (e *IFlowExecutor) CountTokens(ctx context.Context, auth *cliproxyauth.Auth
 
 	from := opts.SourceFormat
 	to := sdktranslator.FromString("openai")
-	body := sdktranslator.TranslateRequest(from, to, baseModel, bytes.Clone(req.Payload), false)
+	body := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
-	enc, err := tokenizerForModel(baseModel)
+	enc, err := helps.TokenizerForModel(baseModel)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: tokenizer init failed: %w", err)
 	}
 
-	count, err := countOpenAIChatTokens(enc, body)
+	count, err := helps.CountOpenAIChatTokens(enc, body)
 	if err != nil {
 		return cliproxyexecutor.Response{}, fmt.Errorf("iflow executor: token counting failed: %w", err)
 	}
 
-	usageJSON := buildOpenAIUsageJSON(count)
+	usageJSON := helps.BuildOpenAIUsageJSON(count)
 	translated := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translated}, nil
 }
@@ -440,15 +447,10 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 		auth.Metadata["api_key"] = tokenData.APIKey
 	}
 	auth.Metadata["expired"] = tokenData.Expire
-	auth.Metadata["expires_at"] = tokenData.Expire
 	auth.Metadata["type"] = "iflow"
 	auth.Metadata["last_refresh"] = time.Now().Format(time.RFC3339)
 
-	if expiresAt, err := time.Parse(time.RFC3339, tokenData.Expire); err == nil {
-		auth.NextRefreshAfter = expiresAt.Add(-36 * time.Hour)
-		log.Debugf("iflow executor: set NextRefreshAfter to %v", auth.NextRefreshAfter.Format(time.RFC3339))
-	}
-
+	// Log the new access token (masked) after successful refresh
 	log.Debugf("iflow executor: token refresh successful, new: %s", util.HideAPIKey(tokenData.AccessToken))
 
 	if auth.Attributes == nil {
@@ -464,10 +466,7 @@ func (e *IFlowExecutor) refreshOAuthBased(ctx context.Context, auth *cliproxyaut
 func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	r.Header.Set("Content-Type", "application/json")
 	r.Header.Set("Authorization", "Bearer "+apiKey)
-
-	// Build User-Agent matching official iFlow CLI: iFlowCLI/0.5.14 (linux; amd64)
-	userAgent := buildIFlowUserAgent()
-	r.Header.Set("User-Agent", userAgent)
+	r.Header.Set("User-Agent", iflowUserAgent)
 
 	// Generate session-id
 	sessionID := "session-" + generateUUID()
@@ -477,8 +476,7 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	timestamp := time.Now().UnixMilli()
 	r.Header.Set("x-iflow-timestamp", fmt.Sprintf("%d", timestamp))
 
-	// Signature uses the same User-Agent string for HMAC calculation
-	signature := createIFlowSignature(userAgent, sessionID, timestamp, apiKey)
+	signature := createIFlowSignature(iflowUserAgent, sessionID, timestamp, apiKey)
 	if signature != "" {
 		r.Header.Set("x-iflow-signature", signature)
 	}
@@ -488,22 +486,6 @@ func applyIFlowHeaders(r *http.Request, apiKey string, stream bool) {
 	} else {
 		r.Header.Set("Accept", "application/json")
 	}
-}
-
-// buildIFlowUserAgent constructs a User-Agent string matching the official iFlow CLI format.
-// Example: iFlowCLI/0.5.14 (linux; amd64)
-func buildIFlowUserAgent() string {
-	// Map Go's runtime.GOARCH to common architecture names
-	arch := runtime.GOARCH
-	switch arch {
-	case "amd64":
-		arch = "x64"
-	case "arm64":
-		arch = "arm64"
-	case "386":
-		arch = "x86"
-	}
-	return fmt.Sprintf("%s (%s; %s)", iflowUserAgentPrefix, runtime.GOOS, arch)
 }
 
 // createIFlowSignature generates HMAC-SHA256 signature for iFlow API requests.

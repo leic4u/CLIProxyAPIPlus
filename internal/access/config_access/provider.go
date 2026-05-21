@@ -91,9 +91,8 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		}
 		if _, ok := p.keys[candidate.value]; ok {
 			return &sdkaccess.Result{
-				Provider:     p.Identifier(),
-				ProviderType: sdkaccess.AccessProviderTypeConfigAPIKey,
-				Principal:    candidate.value,
+				Provider:  p.Identifier(),
+				Principal: candidate.value,
 				Metadata: map[string]string{
 					"source": candidate.source,
 				},
@@ -101,7 +100,7 @@ func (p *provider) Authenticate(_ context.Context, r *http.Request) (*sdkaccess.
 		}
 	}
 
-	return nil, sdkaccess.NewInvalidCredentialErrorForProvider(sdkaccess.AccessProviderTypeConfigAPIKey)
+	return nil, sdkaccess.NewInvalidCredentialError()
 }
 
 func extractBearerToken(header string) string {

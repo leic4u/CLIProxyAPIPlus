@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"sort"
 	"strings"
 	"syscall"
 
@@ -93,21 +92,11 @@ type Config struct {
 	// QuotaExceeded defines the behavior when a quota is exceeded.
 	QuotaExceeded QuotaExceeded `yaml:"quota-exceeded" json:"quota-exceeded"`
 
-	// AntigravityPrimaryHandoff enables automatic primary credential handoff for Antigravity provider.
-	// When true, only one Antigravity credential is active (primary) at a time. If the primary
-	// fails with 401/403/429/502/503/504, the next credential in order becomes primary.
-	// Quota checks are performed only on the primary credential.
-	AntigravityPrimaryHandoff bool `yaml:"antigravity-primary-handoff" json:"antigravity-primary-handoff"`
-
 	// Routing controls credential selection behavior.
 	Routing RoutingConfig `yaml:"routing" json:"routing"`
 
 	// WebsocketAuth enables or disables authentication for the WebSocket API.
 	WebsocketAuth bool `yaml:"ws-auth" json:"ws-auth"`
-
-	// APIKeyIPBlacklist configures automatic temporary IP blocking for repeated
-	// invalid inline API key attempts on the main API surface.
-	APIKeyIPBlacklist APIKeyIPBlacklistConfig `yaml:"api-key-ip-blacklist,omitempty" json:"api-key-ip-blacklist,omitempty"`
 
 	// AntigravitySignatureCacheEnabled controls whether signature cache validation is enabled for thinking blocks.
 	// When true (default), cached signatures are preferred and validated.
@@ -140,11 +129,23 @@ type Config struct {
 	// not see any system instructions. Set to true to enable injection.
 	KiroSystemPromptInjectEnable *bool `yaml:"kiro-system-prompt-inject-enable,omitempty" json:"kiro-system-prompt-inject-enable,omitempty"`
 
+	// KiroTruncationDetectorEnable controls whether the heuristic truncation detector
+	// is applied to Kiro tool use responses. When enabled, tool calls that appear
+	// truncated (invalid JSON, missing required fields, etc.) are silently skipped.
+	// Default: false (disabled). The detector uses heuristic matching that can produce
+	// false positives, so it is off by default.
+	KiroTruncationDetectorEnable *bool `yaml:"kiro-truncation-detector-enable,omitempty" json:"kiro-truncation-detector-enable,omitempty"`
+
+	// KiroExtractThinkingTagEnable controls whether inline <thinking>...</thinking>
+	// tags in Kiro assistantResponseEvent content are parsed into Claude thinking
+	// content blocks. Kiro's official reasoning channel is reasoningContentEvent;
+	// the tag-based path is unofficial and can false-positive when content literally
+	// contains the tag string (code samples, discussion, XML fixtures), silently
+	// truncating responses. Default: false (disabled).
+	KiroExtractThinkingTagEnable *bool `yaml:"kiro-extract-thinking-tag-enable,omitempty" json:"kiro-extract-thinking-tag-enable,omitempty"`
+
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
-
-	// OllamaKey defines Ollama Cloud API key configurations.
-	OllamaKey []OllamaKey `yaml:"ollama-api-key" json:"ollama-api-key"`
 
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
@@ -173,14 +174,13 @@ type Config struct {
 
 	// OAuthModelAlias defines global model name aliases for OAuth/file-backed auth channels.
 	// These aliases affect both model listing and model routing for supported channels:
-	// gemini-cli, vertex, aistudio, antigravity, claude, codex, iflow, kiro, github-copilot, kimi, xai.
+	// gemini-cli, vertex, aistudio, antigravity, claude, codex, kimi, xai.
 	//
 	// NOTE: This does not apply to existing per-credential model alias features under:
 	// gemini-api-key, codex-api-key, claude-api-key, openai-compatibility, vertex-api-key, and ampcode.
 	OAuthModelAlias map[string][]OAuthModelAlias `yaml:"oauth-model-alias,omitempty" json:"oauth-model-alias,omitempty"`
 
-	OAuthEndpointOverrides map[string]OAuthEndpointConfig `yaml:"oauth-endpoint-overrides,omitempty" json:"oauth-endpoint-overrides,omitempty"`
-
+	// Payload defines default and override rules for provider payload parameters.
 	Payload PayloadConfig `yaml:"payload" json:"payload"`
 
 	// IncognitoBrowser enables opening OAuth URLs in incognito/private browsing mode.
@@ -269,22 +269,6 @@ type RoutingConfig struct {
 	// Supported values: "round-robin" (default), "fill-first".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
-	// Mode configures the routing mode.
-	// Supported values: "" (default, provider-scoped), "key-based" (model-only key).
-	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
-
-	// FallbackModels maps original model names to fallback model names.
-	// When all credentials for the original model fail with 429/401/5xx,
-	// the request is automatically retried with the fallback model.
-	FallbackModels map[string]string `yaml:"fallback-models,omitempty" json:"fallback-models,omitempty"`
-
-	// FallbackChain is a general fallback chain for models not in FallbackModels.
-	// Models are tried in order when the original model fails.
-	FallbackChain []string `yaml:"fallback-chain,omitempty" json:"fallback-chain,omitempty"`
-
-	// FallbackMaxDepth limits the number of fallback attempts (default: 3).
-	FallbackMaxDepth int `yaml:"fallback-max-depth,omitempty" json:"fallback-max-depth,omitempty"`
-
 	// SessionAffinity enables universal session-sticky routing for all clients.
 	// Session IDs are extracted from multiple sources:
 	// metadata.user_id (Claude Code session format), X-Session-ID, Session_id (Codex),
@@ -296,38 +280,6 @@ type RoutingConfig struct {
 	// SessionAffinityTTL specifies how long session-to-auth bindings are retained.
 	// Default: 1h. Accepts duration strings like "30m", "1h", "2h30m".
 	SessionAffinityTTL string `yaml:"session-affinity-ttl,omitempty" json:"session-affinity-ttl,omitempty"`
-
-	// TokenThresholdRules defines routing rules that filter eligible credentials
-	// by billing class when the estimated input token count is at or below a threshold.
-	TokenThresholdRules []TokenThresholdRule `yaml:"token-threshold-rules,omitempty" json:"token-threshold-rules,omitempty"`
-}
-
-// APIKeyIPBlacklistConfig defines the automatic IP blacklist policy applied to
-// repeated invalid inline API key attempts on the main API.
-type APIKeyIPBlacklistConfig struct {
-	FailureThreshold int    `yaml:"failure-threshold,omitempty" json:"failure-threshold,omitempty"`
-	FailureWindow    string `yaml:"failure-window,omitempty" json:"failure-window,omitempty"`
-	BlockDuration    string `yaml:"block-duration,omitempty" json:"block-duration,omitempty"`
-}
-
-// BillingClass identifies how a credential/provider is billed for routing policy.
-type BillingClass string
-
-const (
-	BillingClassMetered    BillingClass = "metered"
-	BillingClassPerRequest BillingClass = "per-request"
-)
-
-// TokenThresholdRule routes matching requests to credentials of a target billing class
-// when the estimated input token count matches the specified range.
-// Three forms are supported: upper-only (MaxTokens), lower-only (MinTokens), bounded (both).
-// At least one of MinTokens or MaxTokens must be specified.
-type TokenThresholdRule struct {
-	ModelPattern string       `yaml:"model-pattern,omitempty" json:"model-pattern,omitempty"`
-	MinTokens    int          `yaml:"min-tokens,omitempty" json:"min-tokens,omitempty"`
-	MaxTokens    int          `yaml:"max-tokens,omitempty" json:"max-tokens,omitempty"`
-	BillingClass BillingClass `yaml:"billing-class" json:"billing-class"`
-	Enabled      bool         `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 }
 
 // OAuthModelAlias defines a model ID alias for a specific channel.
@@ -338,38 +290,6 @@ type OAuthModelAlias struct {
 	Name  string `yaml:"name" json:"name"`
 	Alias string `yaml:"alias" json:"alias"`
 	Fork  bool   `yaml:"fork,omitempty" json:"fork,omitempty"`
-}
-
-type OAuthEndpointConfig struct {
-	ApiBaseURL         string `yaml:"api-base-url,omitempty" json:"api-base-url,omitempty"`
-	AuthorizeURL       string `yaml:"authorize-url,omitempty" json:"authorize-url,omitempty"`
-	TokenURL           string `yaml:"token-url,omitempty" json:"token-url,omitempty"`
-	RefreshURL         string `yaml:"refresh-url,omitempty" json:"refresh-url,omitempty"`
-	UserinfoURL        string `yaml:"userinfo-url,omitempty" json:"userinfo-url,omitempty"`
-	DeviceAuthorizeURL string `yaml:"device-authorize-url,omitempty" json:"device-authorize-url,omitempty"`
-}
-
-func (c *OAuthEndpointConfig) ApplyDefaults(defaults OAuthEndpointConfig) OAuthEndpointConfig {
-	result := *c
-	if result.ApiBaseURL == "" {
-		result.ApiBaseURL = defaults.ApiBaseURL
-	}
-	if result.AuthorizeURL == "" {
-		result.AuthorizeURL = defaults.AuthorizeURL
-	}
-	if result.TokenURL == "" {
-		result.TokenURL = defaults.TokenURL
-	}
-	if result.RefreshURL == "" {
-		result.RefreshURL = defaults.RefreshURL
-	}
-	if result.UserinfoURL == "" {
-		result.UserinfoURL = defaults.UserinfoURL
-	}
-	if result.DeviceAuthorizeURL == "" {
-		result.DeviceAuthorizeURL = defaults.DeviceAuthorizeURL
-	}
-	return result
 }
 
 // AmpModelMapping defines a model name mapping for Amp CLI requests.
@@ -510,6 +430,7 @@ type ClaudeKey struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
 	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/claude-sonnet-4").
@@ -521,9 +442,6 @@ type ClaudeKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
-
-	// BillingClass classifies this credential for threshold-based routing policies.
-	BillingClass BillingClass `yaml:"billing-class,omitempty" json:"billing-class,omitempty"`
 
 	// Models defines upstream model names and aliases for request routing.
 	Models []ClaudeModel `yaml:"models" json:"models"`
@@ -568,6 +486,7 @@ type CodexKey struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
 	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gpt-5-codex").
@@ -582,9 +501,6 @@ type CodexKey struct {
 
 	// ProxyURL overrides the global proxy setting for this API key if provided.
 	ProxyURL string `yaml:"proxy-url" json:"proxy-url"`
-
-	// BillingClass classifies this credential for threshold-based routing policies.
-	BillingClass BillingClass `yaml:"billing-class,omitempty" json:"billing-class,omitempty"`
 
 	// Models defines upstream model names and aliases for request routing.
 	Models []CodexModel `yaml:"models" json:"models"`
@@ -614,48 +530,6 @@ type CodexModel struct {
 func (m CodexModel) GetName() string  { return m.Name }
 func (m CodexModel) GetAlias() string { return m.Alias }
 
-// OllamaKey represents the configuration for an Ollama Cloud API key.
-type OllamaKey struct {
-	// APIKey is the authentication key for accessing Ollama Cloud.
-	APIKey string `yaml:"api-key" json:"api-key"`
-
-	// Priority controls selection preference when multiple credentials match.
-	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
-
-	// Prefix optionally namespaces models for this credential.
-	Prefix string `yaml:"prefix,omitempty" json:"prefix,omitempty"`
-
-	// BaseURL is the Ollama API endpoint. If empty, https://ollama.com/api is used.
-	BaseURL string `yaml:"base-url,omitempty" json:"base-url,omitempty"`
-
-	// ProxyURL overrides the global proxy setting for this API key if provided.
-	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
-
-	// BillingClass classifies this credential for threshold-based routing policies.
-	BillingClass BillingClass `yaml:"billing-class,omitempty" json:"billing-class,omitempty"`
-
-	// Models defines upstream model names and aliases for request routing.
-	Models []OllamaModel `yaml:"models,omitempty" json:"models,omitempty"`
-
-	// Headers optionally adds extra HTTP headers for requests sent with this key.
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-
-	// ExcludedModels lists model IDs that should be excluded for this provider.
-	ExcludedModels []string `yaml:"excluded-models,omitempty" json:"excluded-models,omitempty"`
-}
-
-func (k OllamaKey) GetAPIKey() string  { return k.APIKey }
-func (k OllamaKey) GetBaseURL() string { return k.BaseURL }
-
-// OllamaModel describes a mapping between an alias and the actual upstream model name.
-type OllamaModel struct {
-	Name  string `yaml:"name" json:"name"`
-	Alias string `yaml:"alias" json:"alias"`
-}
-
-func (m OllamaModel) GetName() string  { return m.Name }
-func (m OllamaModel) GetAlias() string { return m.Alias }
-
 // GeminiKey represents the configuration for a Gemini API key,
 // including optional overrides for upstream base URL, proxy routing, and headers.
 type GeminiKey struct {
@@ -663,6 +537,7 @@ type GeminiKey struct {
 	APIKey string `yaml:"api-key" json:"api-key"`
 
 	// Priority controls selection preference when multiple credentials match.
+	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
 
 	// Prefix optionally namespaces models for this credential (e.g., "teamA/gemini-3-pro-preview").
@@ -673,9 +548,6 @@ type GeminiKey struct {
 
 	// ProxyURL optionally overrides the global proxy for this API key.
 	ProxyURL string `yaml:"proxy-url,omitempty" json:"proxy-url,omitempty"`
-
-	// BillingClass classifies this credential for threshold-based routing policies.
-	BillingClass BillingClass `yaml:"billing-class,omitempty" json:"billing-class,omitempty"`
 
 	// Models defines upstream model names and aliases for request routing.
 	Models []GeminiModel `yaml:"models,omitempty" json:"models,omitempty"`
@@ -783,10 +655,8 @@ type OpenAICompatibility struct {
 	Name string `yaml:"name" json:"name"`
 
 	// Priority controls selection preference when multiple providers or credentials match.
+	// Higher values are preferred; defaults to 0.
 	Priority int `yaml:"priority,omitempty" json:"priority,omitempty"`
-
-	// BillingClass classifies this provider for threshold-based routing policies.
-	BillingClass BillingClass `yaml:"billing-class,omitempty" json:"billing-class,omitempty"`
 
 	// Disabled prevents this provider from being used for routing.
 	Disabled bool `yaml:"disabled,omitempty" json:"disabled,omitempty"`
@@ -827,6 +697,9 @@ type OpenAICompatibilityModel struct {
 
 	// Alias is the model name alias that clients will use to reference this model.
 	Alias string `yaml:"alias" json:"alias"`
+
+	// Image marks this model as callable through /v1/images/generations and /v1/images/edits.
+	Image bool `yaml:"image,omitempty" json:"image,omitempty"`
 
 	// Thinking configures the thinking/reasoning capability for this model.
 	// If nil, the model defaults to level-based reasoning with levels ["low", "medium", "high"].
@@ -895,18 +768,21 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
-	var legacy legacyConfigData
-	if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
-		if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
-			cfg.legacyMigrationPending = true
-		}
-		if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
-			cfg.legacyMigrationPending = true
-		}
-		if cfg.migrateLegacyAmpConfig(&legacy) {
-			cfg.legacyMigrationPending = true
-		}
-	}
+	// NOTE: Startup legacy key migration is intentionally disabled.
+	// Reason: avoid mutating config.yaml during server startup.
+	// Re-enable the block below if automatic startup migration is needed again.
+	// var legacy legacyConfigData
+	// if errLegacy := yaml.Unmarshal(data, &legacy); errLegacy == nil {
+	// 	if cfg.migrateLegacyGeminiKeys(legacy.LegacyGeminiKeys) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// 	if cfg.migrateLegacyOpenAICompatibilityKeys(legacy.OpenAICompat) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// 	if cfg.migrateLegacyAmpConfig(&legacy) {
+	// 		cfg.legacyMigrationPending = true
+	// 	}
+	// }
 
 	// Hash remote management key if plaintext is detected (nested)
 	// We consider a value to be already hashed if it looks like a bcrypt hash ($2a$, $2b$, or $2y$ prefix).
@@ -960,9 +836,6 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize Codex keys: drop entries without base-url
 	cfg.SanitizeCodexKeys()
 
-	// Sanitize Ollama keys.
-	cfg.SanitizeOllamaKeys()
-
 	// Sanitize Codex header defaults.
 	cfg.SanitizeCodexHeaderDefaults()
 
@@ -978,50 +851,32 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	// Sanitize OpenAI compatibility providers: drop entries without base-url
 	cfg.SanitizeOpenAICompatibility()
 
-	// Sanitize token-threshold routing rules.
-	cfg.SanitizeTokenThresholdRules()
-
-	// Normalize automatic API-key IP blacklist policy.
-	cfg.SanitizeAPIKeyIPBlacklist()
-
 	// Normalize OAuth provider model exclusion map.
 	cfg.OAuthExcludedModels = NormalizeOAuthExcludedModels(cfg.OAuthExcludedModels)
 
 	// Normalize global OAuth model name aliases.
 	cfg.SanitizeOAuthModelAlias()
 
-	cfg.NormalizeOAuthEndpointOverrides()
-
 	// Validate raw payload rules and drop invalid entries.
 	cfg.SanitizePayloadRules()
 
-	if cfg.legacyMigrationPending {
-		fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
-		if !optional && configFile != "" {
-			if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
-				return nil, fmt.Errorf("failed to persist migrated legacy config: %w", err)
-			}
-			fmt.Println("Legacy configuration normalized and persisted.")
-		} else {
-			fmt.Println("Legacy configuration normalized in memory; persistence skipped.")
-		}
-	}
+	// NOTE: Legacy migration persistence is intentionally disabled together with
+	// startup legacy migration to keep startup read-only for config.yaml.
+	// Re-enable the block below if automatic startup migration is needed again.
+	// if cfg.legacyMigrationPending {
+	// 	fmt.Println("Detected legacy configuration keys, attempting to persist the normalized config...")
+	// 	if !optional && configFile != "" {
+	// 		if err := SaveConfigPreserveComments(configFile, &cfg); err != nil {
+	// 			return nil, fmt.Errorf("failed to persist migrated legacy config: %w", err)
+	// 		}
+	// 		fmt.Println("Legacy configuration normalized and persisted.")
+	// 	} else {
+	// 		fmt.Println("Legacy configuration normalized in memory; persistence skipped.")
+	// 	}
+	// }
 
 	// Return the populated configuration struct.
 	return &cfg, nil
-}
-
-// SanitizeAPIKeyIPBlacklist trims user-provided duration strings and clamps the
-// failure threshold to a non-negative value.
-func (cfg *Config) SanitizeAPIKeyIPBlacklist() {
-	if cfg == nil {
-		return
-	}
-	if cfg.APIKeyIPBlacklist.FailureThreshold < 0 {
-		cfg.APIKeyIPBlacklist.FailureThreshold = 0
-	}
-	cfg.APIKeyIPBlacklist.FailureWindow = strings.TrimSpace(cfg.APIKeyIPBlacklist.FailureWindow)
-	cfg.APIKeyIPBlacklist.BlockDuration = strings.TrimSpace(cfg.APIKeyIPBlacklist.BlockDuration)
 }
 
 // SanitizePayloadRules validates raw JSON payload rule params and drops invalid rules.
@@ -1105,8 +960,7 @@ func (cfg *Config) SanitizeClaudeHeaderDefaults() {
 
 // SanitizeOAuthModelAlias normalizes and deduplicates global OAuth model name aliases.
 // It trims whitespace, normalizes channel keys to lower-case, drops empty entries,
-// allows multiple source models to share the same alias, and ensures each name+alias
-// combination is unique within each channel.
+// allows multiple aliases per upstream name, and ensures aliases are unique within each channel.
 // It also injects default aliases for channels that have built-in defaults (e.g., kiro)
 // when no user-configured aliases exist for those channels.
 func (cfg *Config) SanitizeOAuthModelAlias() {
@@ -1149,9 +1003,7 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			out[channel] = nil
 			continue
 		}
-		// Deduplicate by name+alias combination (not just alias)
-		// This allows multiple source models to share the same alias
-		seenNameAlias := make(map[string]struct{}, len(aliases))
+		seenAlias := make(map[string]struct{}, len(aliases))
 		clean := make([]OAuthModelAlias, 0, len(aliases))
 		for _, entry := range aliases {
 			name := strings.TrimSpace(entry.Name)
@@ -1162,12 +1014,11 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 			if strings.EqualFold(name, alias) {
 				continue
 			}
-			// Deduplicate by name+alias combination (case-insensitive)
-			nameAliasKey := strings.ToLower(name + "::" + alias)
-			if _, ok := seenNameAlias[nameAliasKey]; ok {
+			aliasKey := strings.ToLower(alias)
+			if _, ok := seenAlias[aliasKey]; ok {
 				continue
 			}
-			seenNameAlias[nameAliasKey] = struct{}{}
+			seenAlias[aliasKey] = struct{}{}
 			clean = append(clean, OAuthModelAlias{Name: name, Alias: alias, Fork: entry.Fork})
 		}
 		if len(clean) > 0 {
@@ -1190,7 +1041,6 @@ func (cfg *Config) SanitizeOpenAICompatibility() {
 		e.Name = strings.TrimSpace(e.Name)
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
-		e.BillingClass = normalizeBillingClass(e.BillingClass)
 		e.Headers = NormalizeHeaders(e.Headers)
 		if e.BaseURL == "" {
 			// Skip providers with no base-url; treated as removed
@@ -1212,7 +1062,6 @@ func (cfg *Config) SanitizeCodexKeys() {
 		e := cfg.CodexKey[i]
 		e.Prefix = normalizeModelPrefix(e.Prefix)
 		e.BaseURL = strings.TrimSpace(e.BaseURL)
-		e.BillingClass = normalizeBillingClass(e.BillingClass)
 		e.Headers = NormalizeHeaders(e.Headers)
 		e.ExcludedModels = NormalizeExcludedModels(e.ExcludedModels)
 		if e.BaseURL == "" {
@@ -1223,36 +1072,6 @@ func (cfg *Config) SanitizeCodexKeys() {
 	cfg.CodexKey = out
 }
 
-// SanitizeOllamaKeys normalizes Ollama credentials and drops entries without API keys.
-func (cfg *Config) SanitizeOllamaKeys() {
-	if cfg == nil {
-		return
-	}
-
-	seen := make(map[string]struct{}, len(cfg.OllamaKey))
-	out := cfg.OllamaKey[:0]
-	for i := range cfg.OllamaKey {
-		entry := cfg.OllamaKey[i]
-		entry.APIKey = strings.TrimSpace(entry.APIKey)
-		if entry.APIKey == "" {
-			continue
-		}
-		entry.Prefix = normalizeModelPrefix(entry.Prefix)
-		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
-		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.BillingClass = normalizeBillingClass(entry.BillingClass)
-		entry.Headers = NormalizeHeaders(entry.Headers)
-		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
-		key := strings.ToLower(entry.APIKey) + "\x00" + strings.ToLower(entry.BaseURL)
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		out = append(out, entry)
-	}
-	cfg.OllamaKey = out
-}
-
 // SanitizeClaudeKeys normalizes headers for Claude credentials.
 func (cfg *Config) SanitizeClaudeKeys() {
 	if cfg == nil || len(cfg.ClaudeKey) == 0 {
@@ -1261,7 +1080,6 @@ func (cfg *Config) SanitizeClaudeKeys() {
 	for i := range cfg.ClaudeKey {
 		entry := &cfg.ClaudeKey[i]
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
-		entry.BillingClass = normalizeBillingClass(entry.BillingClass)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 	}
@@ -1302,7 +1120,6 @@ func (cfg *Config) SanitizeGeminiKeys() {
 		entry.Prefix = normalizeModelPrefix(entry.Prefix)
 		entry.BaseURL = strings.TrimSpace(entry.BaseURL)
 		entry.ProxyURL = strings.TrimSpace(entry.ProxyURL)
-		entry.BillingClass = normalizeBillingClass(entry.BillingClass)
 		entry.Headers = NormalizeHeaders(entry.Headers)
 		entry.ExcludedModels = NormalizeExcludedModels(entry.ExcludedModels)
 		uniqueKey := entry.APIKey + "|" + entry.BaseURL
@@ -1315,60 +1132,6 @@ func (cfg *Config) SanitizeGeminiKeys() {
 	cfg.GeminiKey = out
 }
 
-// SanitizeTokenThresholdRules normalizes routing token-threshold rules and removes invalid entries.
-func (cfg *Config) SanitizeTokenThresholdRules() {
-	if cfg == nil || len(cfg.Routing.TokenThresholdRules) == 0 {
-		return
-	}
-	out := make([]TokenThresholdRule, 0, len(cfg.Routing.TokenThresholdRules))
-	for i := range cfg.Routing.TokenThresholdRules {
-		rule := cfg.Routing.TokenThresholdRules[i]
-		rule.ModelPattern = strings.TrimSpace(rule.ModelPattern)
-		rule.BillingClass = normalizeBillingClass(rule.BillingClass)
-		if rule.BillingClass == "" {
-			continue
-		}
-		if rule.MinTokens < 0 {
-			rule.MinTokens = 0
-		}
-		if rule.MaxTokens < 0 {
-			rule.MaxTokens = 0
-		}
-		hasMin := rule.MinTokens > 0
-		hasMax := rule.MaxTokens > 0
-		if !hasMin && !hasMax {
-			continue
-		}
-		if hasMin && hasMax && rule.MinTokens > rule.MaxTokens {
-			continue
-		}
-		rule.Enabled = true
-		out = append(out, rule)
-	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].MinTokens != out[j].MinTokens {
-			return out[i].MinTokens < out[j].MinTokens
-		}
-		if out[i].MaxTokens == out[j].MaxTokens {
-			return out[i].ModelPattern < out[j].ModelPattern
-		}
-		return out[i].MaxTokens < out[j].MaxTokens
-	})
-	cfg.Routing.TokenThresholdRules = out
-}
-
-func normalizeBillingClass(value BillingClass) BillingClass {
-	normalized := strings.ToLower(strings.TrimSpace(string(value)))
-	switch normalized {
-	case string(BillingClassMetered):
-		return BillingClassMetered
-	case "per_request", string(BillingClassPerRequest):
-		return BillingClassPerRequest
-	default:
-		return ""
-	}
-}
-
 func normalizeModelPrefix(prefix string) string {
 	trimmed := strings.TrimSpace(prefix)
 	trimmed = strings.Trim(trimmed, "/")
@@ -1379,40 +1142,6 @@ func normalizeModelPrefix(prefix string) string {
 		return ""
 	}
 	return trimmed
-}
-
-func (cfg *Config) NormalizeOAuthEndpointOverrides() {
-	if cfg == nil || len(cfg.OAuthEndpointOverrides) == 0 {
-		return
-	}
-	normalized := make(map[string]OAuthEndpointConfig, len(cfg.OAuthEndpointOverrides))
-	for provider, ep := range cfg.OAuthEndpointOverrides {
-		normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
-		if normalizedProvider == "" {
-			continue
-		}
-		ep.ApiBaseURL = strings.TrimSpace(ep.ApiBaseURL)
-		ep.AuthorizeURL = strings.TrimSpace(ep.AuthorizeURL)
-		ep.TokenURL = strings.TrimSpace(ep.TokenURL)
-		ep.RefreshURL = strings.TrimSpace(ep.RefreshURL)
-		ep.UserinfoURL = strings.TrimSpace(ep.UserinfoURL)
-		ep.DeviceAuthorizeURL = strings.TrimSpace(ep.DeviceAuthorizeURL)
-		normalized[normalizedProvider] = ep
-	}
-	cfg.OAuthEndpointOverrides = normalized
-}
-
-func (cfg *Config) GetOAuthEndpointOverride(provider string) OAuthEndpointConfig {
-	if cfg == nil {
-		return OAuthEndpointConfig{}
-	}
-	normalizedProvider := strings.ToLower(strings.TrimSpace(provider))
-	if cfg.OAuthEndpointOverrides != nil {
-		if ep, ok := cfg.OAuthEndpointOverrides[normalizedProvider]; ok {
-			return ep
-		}
-	}
-	return OAuthEndpointConfig{}
 }
 
 // looksLikeBcrypt returns true if the provided string appears to be a bcrypt hash.

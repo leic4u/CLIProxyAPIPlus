@@ -59,7 +59,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
-const maxBypassSignatureLen = 8192
+const maxBypassSignatureLen = 32 * 1024 * 1024
 
 type claudeSignatureTree struct {
 	EncodingLayers      int
@@ -71,6 +71,62 @@ type claudeSignatureTree struct {
 	ModelText           string
 	LegacyRouteHint     string
 	HasField7           bool
+}
+
+// StripInvalidSignatureThinkingBlocks removes thinking blocks whose signatures
+// are empty or not valid Claude format (must start with 'E' or 'R' after
+// stripping any cache prefix). These come from proxy-generated responses
+// (Antigravity/Gemini) where no real Claude signature exists.
+func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.IsArray() {
+		return payload
+	}
+	modified := false
+	for i, msg := range messages.Array() {
+		content := msg.Get("content")
+		if !content.IsArray() {
+			continue
+		}
+		var kept []string
+		stripped := false
+		for _, part := range content.Array() {
+			if part.Get("type").String() == "thinking" && !hasValidClaudeSignature(part.Get("signature").String()) {
+				stripped = true
+				continue
+			}
+			kept = append(kept, part.Raw)
+		}
+		if stripped {
+			modified = true
+			if len(kept) == 0 {
+				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("[]"))
+			} else {
+				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("["+strings.Join(kept, ",")+"]"))
+			}
+		}
+	}
+	if !modified {
+		return payload
+	}
+	return payload
+}
+
+// hasValidClaudeSignature returns true if sig looks like a real Claude thinking
+// signature: non-empty and starts with 'E' or 'R' (after stripping optional
+// cache prefix like "modelGroup#").
+func hasValidClaudeSignature(sig string) bool {
+	sig = strings.TrimSpace(sig)
+	if sig == "" {
+		return false
+	}
+	if idx := strings.IndexByte(sig, '#'); idx >= 0 {
+		sig = strings.TrimSpace(sig[idx+1:])
+	}
+	if sig == "" {
+		return false
+	}
+	return sig[0] == 'E' || sig[0] == 'R'
 }
 
 func ValidateClaudeBypassSignatures(inputRawJSON []byte) error {
@@ -389,56 +445,4 @@ func decodeBytesField(raw []byte, label string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid Claude signature: failed to decode %s: %w", label, protowire.ParseError(n))
 	}
 	return value, nil
-}
-
-func StripEmptySignatureThinkingBlocks(payload []byte) []byte {
-	messages := gjson.GetBytes(payload, "messages")
-	if !messages.IsArray() {
-		return payload
-	}
-	modified := false
-	for i, msg := range messages.Array() {
-		content := msg.Get("content")
-		if !content.IsArray() {
-			continue
-		}
-		var kept []string
-		stripped := false
-		for _, part := range content.Array() {
-			if part.Get("type").String() == "thinking" && !hasValidClaudeSignature(part.Get("signature").String()) {
-				stripped = true
-				continue
-			}
-			kept = append(kept, part.Raw)
-		}
-		if stripped {
-			modified = true
-			if len(kept) == 0 {
-				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("[]"))
-			} else {
-				payload, _ = sjson.SetRawBytes(payload, fmt.Sprintf("messages.%d.content", i), []byte("["+strings.Join(kept, ",")+"]"))
-			}
-		}
-	}
-	if !modified {
-		return payload
-	}
-	return payload
-}
-
-// hasValidClaudeSignature returns true if sig looks like a real Claude thinking
-// signature: non-empty and starts with 'E' or 'R' (after stripping optional
-// cache prefix like "modelGroup#").
-func hasValidClaudeSignature(sig string) bool {
-	sig = strings.TrimSpace(sig)
-	if sig == "" {
-		return false
-	}
-	if idx := strings.IndexByte(sig, '#'); idx >= 0 {
-		sig = strings.TrimSpace(sig[idx+1:])
-	}
-	if sig == "" {
-		return false
-	}
-	return sig[0] == 'E' || sig[0] == 'R'
 }

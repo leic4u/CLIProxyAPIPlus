@@ -18,11 +18,10 @@ const (
 
 // AuthError carries authentication failure details and HTTP status.
 type AuthError struct {
-	Code         AuthErrorCode
-	Message      string
-	StatusCode   int
-	Cause        error
-	ProviderType string
+	Code       AuthErrorCode
+	Message    string
+	StatusCode int
+	Cause      error
 }
 
 func (e *AuthError) Error() string {
@@ -63,22 +62,12 @@ func newAuthError(code AuthErrorCode, message string, statusCode int, cause erro
 	}
 }
 
-func newProviderAuthError(code AuthErrorCode, message string, statusCode int, cause error, providerType string) *AuthError {
-	authErr := newAuthError(code, message, statusCode, cause)
-	authErr.ProviderType = strings.TrimSpace(providerType)
-	return authErr
-}
-
 func NewNoCredentialsError() *AuthError {
 	return newAuthError(AuthErrorCodeNoCredentials, "Missing API key", http.StatusUnauthorized, nil)
 }
 
 func NewInvalidCredentialError() *AuthError {
 	return newAuthError(AuthErrorCodeInvalidCredential, "Invalid API key", http.StatusUnauthorized, nil)
-}
-
-func NewInvalidCredentialErrorForProvider(providerType string) *AuthError {
-	return newProviderAuthError(AuthErrorCodeInvalidCredential, "Invalid API key", http.StatusUnauthorized, nil, providerType)
 }
 
 func NewNotHandledError() *AuthError {

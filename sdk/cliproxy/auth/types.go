@@ -90,13 +90,6 @@ type Auth struct {
 	// ModelStates tracks per-model runtime availability data.
 	ModelStates map[string]*ModelState `json:"model_states,omitempty"`
 
-	// PrimaryInfo tracks primary credential handoff state for providers that use
-	// a single-active-credential model (e.g. Antigravity). When non-nil, this
-	// credential participates in primary handoff: only the credential with
-	// IsPrimary=true is enabled for selection; the rest are disabled.
-	// Handoff is triggered on specific error status codes (401/403/429/502/503/504).
-	PrimaryInfo *PrimaryInfo `json:"primary_info,omitempty"`
-
 	// Runtime carries non-serialisable data used during execution (in-memory only).
 	Runtime any `json:"-"`
 
@@ -156,20 +149,6 @@ type ModelState struct {
 	Quota QuotaState `json:"quota"`
 	// UpdatedAt tracks the last update timestamp for this model state.
 	UpdatedAt time.Time `json:"updated_at"`
-}
-
-// PrimaryInfo tracks primary credential handoff state for providers that use
-// a single-active-credential model. When non-nil, this credential participates
-// in primary handoff: only the credential with IsPrimary=true is enabled for
-// selection; the rest are disabled. Handoff is triggered on specific error
-// status codes (401/403/429/502/503/504).
-type PrimaryInfo struct {
-	// IsPrimary indicates whether this credential is the current primary.
-	IsPrimary bool `json:"is_primary"`
-	// Order defines the handoff order among credentials for the same provider.
-	// Lower values are preferred. When primary fails, the next lowest order
-	// credential becomes primary (wrap-around to first if all exhausted).
-	Order int `json:"order"`
 }
 
 func recentRequestBucketID(now time.Time) int64 {
@@ -260,30 +239,8 @@ func (a *Auth) Clone() *Auth {
 			copyAuth.ModelStates[key] = state.Clone()
 		}
 	}
-	if a.PrimaryInfo != nil {
-		copyAuth.PrimaryInfo = &PrimaryInfo{
-			IsPrimary: a.PrimaryInfo.IsPrimary,
-			Order:     a.PrimaryInfo.Order,
-		}
-	}
 	copyAuth.Runtime = a.Runtime
 	return &copyAuth
-}
-
-// SyncPrimaryInfoMetadata keeps persisted metadata aligned with the canonical
-// PrimaryInfo state for providers that serialize handoff information.
-func SyncPrimaryInfoMetadata(auth *Auth) {
-	if auth == nil || auth.Metadata == nil {
-		return
-	}
-	if auth.PrimaryInfo == nil {
-		delete(auth.Metadata, "primary_info")
-		return
-	}
-	auth.Metadata["primary_info"] = map[string]any{
-		"is_primary": auth.PrimaryInfo.IsPrimary,
-		"order":      auth.PrimaryInfo.Order,
-	}
 }
 
 func stableAuthIndex(seed string) string {
