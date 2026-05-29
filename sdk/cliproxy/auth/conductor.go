@@ -1516,8 +1516,16 @@ func (m *Manager) rebuildAPIKeyModelAliasLocked(cfg *internalconfig.Config) {
 			if entry := resolveVertexAPIKeyConfig(cfg, auth); entry != nil {
 				compileAPIKeyModelAliasForModels(byAlias, entry.Models)
 			}
-		default:
-			// OpenAI-compat uses config selection from auth.Attributes.
+		case "commandcode":
+		if entry := resolveCommandCodeAPIKeyConfig(cfg, auth); entry != nil {
+			compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+		}
+	case "mistral":
+		if entry := resolveMistralAPIKeyConfig(cfg, auth); entry != nil {
+			compileAPIKeyModelAliasForModels(byAlias, entry.Models)
+		}
+	default:
+		// OpenAI-compat uses config selection from auth.Attributes.
 			providerKey := ""
 			compatName := ""
 			if auth.Attributes != nil {
@@ -2509,8 +2517,13 @@ func (m *Manager) prepareRequestAuth(ctx context.Context, executor ProviderExecu
 func contextWithRequestedModelAlias(ctx context.Context, opts cliproxyexecutor.Options, fallback string) context.Context {
 	alias := requestedModelAliasFromOptions(opts, fallback)
 	ctx = coreusage.WithRequestedModelAlias(ctx, alias)
-	if effort := reasoningEffortFromOptions(opts); effort != "" {
+	effort := reasoningEffortFromOptions(opts)
+	if effort != "" {
 		ctx = coreusage.WithReasoningEffort(ctx, effort)
+	}
+	serviceTier := serviceTierFromOptions(opts)
+	if serviceTier != "" {
+		ctx = coreusage.WithServiceTier(ctx, serviceTier)
 	}
 	return ctx
 }
@@ -2545,6 +2558,24 @@ func reasoningEffortFromOptions(opts cliproxyexecutor.Options) string {
 		return ""
 	}
 	raw, ok := opts.Metadata[cliproxyexecutor.ReasoningEffortMetadataKey]
+	if !ok || raw == nil {
+		return ""
+	}
+	switch value := raw.(type) {
+	case string:
+		return strings.TrimSpace(value)
+	case []byte:
+		return strings.TrimSpace(string(value))
+	default:
+		return ""
+	}
+}
+
+func serviceTierFromOptions(opts cliproxyexecutor.Options) string {
+	if len(opts.Metadata) == 0 {
+		return ""
+	}
+	raw, ok := opts.Metadata[cliproxyexecutor.ServiceTierMetadataKey]
 	if !ok || raw == nil {
 		return ""
 	}
@@ -2675,6 +2706,10 @@ func (m *Manager) applyAPIKeyModelAlias(auth *Auth, requestedModel string) strin
 		upstreamModel = resolveUpstreamModelForCodexAPIKey(cfg, auth, requestedModel)
 	case "vertex":
 		upstreamModel = resolveUpstreamModelForVertexAPIKey(cfg, auth, requestedModel)
+	case "commandcode":
+		upstreamModel = resolveUpstreamModelForCommandCodeAPIKey(cfg, auth, requestedModel)
+	case "mistral":
+		upstreamModel = resolveUpstreamModelForMistralAPIKey(cfg, auth, requestedModel)
 	default:
 		upstreamModel = resolveUpstreamModelForOpenAICompatAPIKey(cfg, auth, requestedModel)
 	}
@@ -2757,6 +2792,36 @@ func resolveVertexAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internal
 		return nil
 	}
 	return resolveAPIKeyConfig(cfg.VertexCompatAPIKey, auth)
+}
+
+func resolveCommandCodeAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.CommandCodeKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.CommandCodeKey, auth)
+}
+
+func resolveUpstreamModelForCommandCodeAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveCommandCodeAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
+}
+
+func resolveMistralAPIKeyConfig(cfg *internalconfig.Config, auth *Auth) *internalconfig.MistralKey {
+	if cfg == nil {
+		return nil
+	}
+	return resolveAPIKeyConfig(cfg.MistralKey, auth)
+}
+
+func resolveUpstreamModelForMistralAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {
+	entry := resolveMistralAPIKeyConfig(cfg, auth)
+	if entry == nil {
+		return ""
+	}
+	return resolveModelAliasFromConfigModels(requestedModel, asModelAliasEntries(entry.Models))
 }
 
 func resolveUpstreamModelForGeminiAPIKey(cfg *internalconfig.Config, auth *Auth, requestedModel string) string {

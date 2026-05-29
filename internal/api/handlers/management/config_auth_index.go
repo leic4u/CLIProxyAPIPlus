@@ -23,6 +23,16 @@ type codexKeyWithAuthIndex struct {
 	AuthIndex string `json:"auth-index,omitempty"`
 }
 
+type commandCodeKeyWithAuthIndex struct {
+	config.CommandCodeKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
+type mistralKeyWithAuthIndex struct {
+	config.MistralKey
+	AuthIndex string `json:"auth-index,omitempty"`
+}
+
 type vertexCompatKeyWithAuthIndex struct {
 	config.VertexCompatKey
 	AuthIndex string `json:"auth-index,omitempty"`
@@ -159,6 +169,64 @@ func (h *Handler) codexKeysWithAuthIndex() []codexKeyWithAuthIndex {
 		out[i] = codexKeyWithAuthIndex{
 			CodexKey:  entry,
 			AuthIndex: authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) commandCodeKeysWithAuthIndex() []commandCodeKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]commandCodeKeyWithAuthIndex, len(h.cfg.CommandCodeKey))
+	for i := range h.cfg.CommandCodeKey {
+		entry := h.cfg.CommandCodeKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("commandcode:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = commandCodeKeyWithAuthIndex{
+			CommandCodeKey: entry,
+			AuthIndex:      authIndex,
+		}
+	}
+	return out
+}
+
+func (h *Handler) mistralKeysWithAuthIndex() []mistralKeyWithAuthIndex {
+	if h == nil {
+		return nil
+	}
+	liveIndexByID := h.liveAuthIndexByID()
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.cfg == nil {
+		return nil
+	}
+
+	idGen := synthesizer.NewStableIDGenerator()
+	out := make([]mistralKeyWithAuthIndex, len(h.cfg.MistralKey))
+	for i := range h.cfg.MistralKey {
+		entry := h.cfg.MistralKey[i]
+		authIndex := ""
+		if key := strings.TrimSpace(entry.APIKey); key != "" {
+			id, _ := idGen.Next("mistral:apikey", key, entry.BaseURL)
+			authIndex = liveIndexByID[id]
+		}
+		out[i] = mistralKeyWithAuthIndex{
+			MistralKey: entry,
+			AuthIndex:  authIndex,
 		}
 	}
 	return out

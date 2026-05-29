@@ -48,6 +48,9 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 	if oldCfg.DisableImageGeneration != newCfg.DisableImageGeneration {
 		changes = append(changes, fmt.Sprintf("disable-image-generation: %v -> %v", oldCfg.DisableImageGeneration, newCfg.DisableImageGeneration))
 	}
+	if strings.TrimSpace(oldCfg.GPTImage2BaseModel) != strings.TrimSpace(newCfg.GPTImage2BaseModel) {
+		changes = append(changes, fmt.Sprintf("gpt-image-2-base-model: %s -> %s", strings.TrimSpace(oldCfg.GPTImage2BaseModel), strings.TrimSpace(newCfg.GPTImage2BaseModel)))
+	}
 	if oldCfg.RequestLog != newCfg.RequestLog {
 		changes = append(changes, fmt.Sprintf("request-log: %t -> %t", oldCfg.RequestLog, newCfg.RequestLog))
 	}
@@ -226,6 +229,41 @@ func BuildConfigChangeDetails(oldCfg, newCfg *config.Config) []string {
 			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
 			if oldExcluded.hash != newExcluded.hash {
 				changes = append(changes, fmt.Sprintf("codex[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
+			}
+		}
+	}
+
+	// CommandCode keys (do not print key material)
+	if len(oldCfg.CommandCodeKey) != len(newCfg.CommandCodeKey) {
+		changes = append(changes, fmt.Sprintf("commandcode-api-key count: %d -> %d", len(oldCfg.CommandCodeKey), len(newCfg.CommandCodeKey)))
+	} else {
+		for i := range oldCfg.CommandCodeKey {
+			o := oldCfg.CommandCodeKey[i]
+			n := newCfg.CommandCodeKey[i]
+			if strings.TrimSpace(o.BaseURL) != strings.TrimSpace(n.BaseURL) {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].base-url: %s -> %s", i, strings.TrimSpace(o.BaseURL), strings.TrimSpace(n.BaseURL)))
+			}
+			if strings.TrimSpace(o.ProxyURL) != strings.TrimSpace(n.ProxyURL) {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].proxy-url: %s -> %s", i, formatProxyURL(o.ProxyURL), formatProxyURL(n.ProxyURL)))
+			}
+			if strings.TrimSpace(o.Prefix) != strings.TrimSpace(n.Prefix) {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].prefix: %s -> %s", i, strings.TrimSpace(o.Prefix), strings.TrimSpace(n.Prefix)))
+			}
+			if strings.TrimSpace(o.APIKey) != strings.TrimSpace(n.APIKey) {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].api-key: updated", i))
+			}
+			if !equalStringMap(o.Headers, n.Headers) {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].headers: updated", i))
+			}
+			oldModels := SummarizeCommandCodeModels(o.Models)
+			newModels := SummarizeCommandCodeModels(n.Models)
+			if oldModels.hash != newModels.hash {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].models: updated (%d -> %d entries)", i, oldModels.count, newModels.count))
+			}
+			oldExcluded := SummarizeExcludedModels(o.ExcludedModels)
+			newExcluded := SummarizeExcludedModels(n.ExcludedModels)
+			if oldExcluded.hash != newExcluded.hash {
+				changes = append(changes, fmt.Sprintf("commandcode[%d].excluded-models: updated (%d -> %d entries)", i, oldExcluded.count, newExcluded.count))
 			}
 		}
 	}
