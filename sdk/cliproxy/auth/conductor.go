@@ -27,6 +27,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/sjson"
 )
 
 const providerAuthContextKey = "cliproxy.provider_auth"
@@ -2336,9 +2337,10 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 			lastErr = errPrepare
 			continue
 		}
+		execReq := sanitizeDownstreamWebsocketFallbackRequest(execCtx, auth, req)
 		countBudget := true
 
-		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, req, opts, routeModel, models, pooled)
+		streamResult, errStream := m.executeStreamWithModelPool(execCtx, executor, auth, provider, execReq, opts, routeModel, models, pooled)
 		if errStream != nil {
 			if errCtx := execCtx.Err(); errCtx != nil {
 				return nil, errCtx
@@ -2364,6 +2366,18 @@ func (m *Manager) executeStreamMixedOnce(ctx context.Context, providers []string
 		attempted[auth.ID] = struct{}{}
 		return streamResult, nil
 	}
+}
+
+func sanitizeDownstreamWebsocketFallbackRequest(ctx context.Context, auth *Auth, req cliproxyexecutor.Request) cliproxyexecutor.Request {
+	if !cliproxyexecutor.DownstreamWebsocket(ctx) || authWebsocketsEnabled(auth) || len(req.Payload) == 0 {
+		return req
+	}
+	updated, errDelete := sjson.DeleteBytes(req.Payload, "generate")
+	if errDelete != nil {
+		return req
+	}
+	req.Payload = updated
+	return req
 }
 
 func ensureRequestedModelMetadata(opts cliproxyexecutor.Options, requestedModel string) cliproxyexecutor.Options {
@@ -3682,6 +3696,8 @@ func isModelSupportErrorMessage(message string) bool {
 		"model unavailable",
 		"not available for your plan",
 		"not available for your account",
+		"no endpoints found",
+		"does not support",
 	}
 	for _, pattern := range patterns {
 		if strings.Contains(lower, pattern) {
@@ -4389,12 +4405,38 @@ func shouldReturnLastErrorOnPickFailure(homeMode bool, lastErr error, errPick er
 	return isHomeRequestRetryExceededError(errPick)
 }
 
+func homeAuthAlreadyTried(tried map[string]struct{}, authID string) bool {
+	authID = strings.TrimSpace(authID)
+	if authID == "" || len(tried) == 0 {
+		return false
+	}
+	_, ok := tried[authID]
+	return ok
+}
+
+func repeatedHomeAuthError() *Error {
+	return &Error{
+		Code:       homeRequestRetryExceededErrorCode,
+		Message:    "home returned a previously tried auth",
+		HTTPStatus: http.StatusServiceUnavailable,
+	}
+}
+
 type homeAuthDispatchResponse struct {
 	Model      string `json:"model"`
 	Provider   string `json:"provider"`
 	AuthIndex  string `json:"auth_index"`
 	UserAPIKey string `json:"user_api_key"`
 	Auth       Auth   `json:"auth"`
+}
+
+type homeAuthDispatcher interface {
+	HeartbeatOK() bool
+	RPopAuth(ctx context.Context, requestedModel string, sessionID string, headers http.Header, count int) ([]byte, error)
+}
+
+var currentHomeDispatcher = func() homeAuthDispatcher {
+	return home.Current()
 }
 
 func setHomeUserAPIKeyOnGinContext(ctx context.Context, apiKey string) {
@@ -4596,7 +4638,7 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 		}
 	}
 
-	client := home.Current()
+	client := currentHomeDispatcher()
 	if client == nil || !client.HeartbeatOK() {
 		return nil, nil, "", &Error{Code: "home_unavailable", Message: "home control center unavailable", HTTPStatus: http.StatusServiceUnavailable}
 	}
@@ -4650,6 +4692,9 @@ func (m *Manager) pickNextViaHome(ctx context.Context, model string, opts clipro
 	}
 	if strings.TrimSpace(auth.ID) == "" {
 		return nil, nil, "", &Error{Code: "invalid_auth", Message: "home returned auth without id", HTTPStatus: http.StatusBadGateway}
+	}
+	if homeAuthAlreadyTried(tried, auth.ID) {
+		return nil, nil, "", repeatedHomeAuthError()
 	}
 	providerKey := strings.ToLower(strings.TrimSpace(auth.Provider))
 	if providerKey == "" {
@@ -5679,7 +5724,9 @@ func (m *Manager) shouldAllowRouteModelFallback(err error) bool {
 	case http.StatusUnprocessableEntity:
 		return isModelSupportError(err)
 	case http.StatusNotFound:
-		return false
+		// 404 with model support error messages (e.g., "No endpoints found that support image input")
+		// should trigger fallback to try alternative models
+		return isModelSupportErrorMessage(err.Error())
 	default:
 		return true
 	}

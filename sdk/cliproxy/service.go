@@ -459,6 +459,8 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		s.coreManager.RegisterExecutor(executor.NewGitHubCopilotExecutor(s.cfg))
 	case "codebuddy":
 		s.coreManager.RegisterExecutor(executor.NewCodeBuddyExecutor(s.cfg))
+	case "qoder":
+		s.coreManager.RegisterExecutor(executor.NewQoderExecutor(s.cfg))
 	case "gitlab":
 		s.coreManager.RegisterExecutor(executor.NewGitLabExecutor(s.cfg))
 	case "commandcode":
@@ -536,6 +538,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		switch strategy {
 		case "fill-first", "fillfirst", "ff":
 			return "fill-first"
+		case "weight-robin", "weightrobin", "wr":
+			return "weight-robin"
 		default:
 			return "round-robin"
 		}
@@ -555,6 +559,8 @@ func (s *Service) applyConfigUpdate(newCfg *config.Config) {
 		switch nextStrategy {
 		case "fill-first":
 			selector = &coreauth.FillFirstSelector{}
+		case "weight-robin":
+			selector = &coreauth.WeightedRobinSelector{}
 		default:
 			selector = &coreauth.RoundRobinSelector{}
 		}
@@ -1251,6 +1257,9 @@ func (s *Service) registerModelsForAuth(a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "codebuddy":
 		models = registry.GetCodeBuddyModels()
+		models = applyExcludedModels(models, excluded)
+	case "qoder":
+		models = registry.GetQoderModels()
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config

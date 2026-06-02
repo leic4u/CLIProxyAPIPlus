@@ -133,6 +133,9 @@ type Config struct {
 	// Codex defines a list of Codex API key configurations as specified in the YAML configuration file.
 	CodexKey []CodexKey `yaml:"codex-api-key" json:"codex-api-key"`
 
+	// Codex configures provider-wide Codex request behavior.
+	Codex CodexConfig `yaml:"codex" json:"codex"`
+
 	// CodexHeaderDefaults configures fallback headers for Codex OAuth model requests.
 	// These are used only when the client does not send its own headers.
 	CodexHeaderDefaults CodexHeaderDefaults `yaml:"codex-header-defaults" json:"codex-header-defaults"`
@@ -207,6 +210,11 @@ type CodexHeaderDefaults struct {
 	BetaFeatures string `yaml:"beta-features" json:"beta-features"`
 }
 
+// CodexConfig configures provider-wide Codex request behavior.
+type CodexConfig struct {
+	IdentityConfuse bool `yaml:"identity-confuse" json:"identity-confuse"`
+}
+
 // TLSConfig holds HTTPS server settings.
 type TLSConfig struct {
 	// Enable toggles HTTPS server mode.
@@ -259,7 +267,7 @@ type QuotaExceeded struct {
 // RoutingConfig configures how credentials are selected for requests.
 type RoutingConfig struct {
 	// Strategy selects the credential selection strategy.
-	// Supported values: "round-robin" (default), "fill-first".
+	// Supported values: "round-robin" (default), "fill-first", "weight-robin".
 	Strategy string `yaml:"strategy,omitempty" json:"strategy,omitempty"`
 
 	// Mode configures the routing mode.
@@ -1160,6 +1168,9 @@ func (cfg *Config) SanitizeOAuthModelAlias() {
 	}
 	if !hasChannel("github-copilot") {
 		cfg.OAuthModelAlias["github-copilot"] = defaultGitHubCopilotAliases()
+	}
+	if !hasChannel("qoder") {
+		cfg.OAuthModelAlias["qoder"] = defaultQoderAliases()
 	}
 
 	if len(cfg.OAuthModelAlias) == 0 {

@@ -22,6 +22,7 @@ import (
 	cliproxyexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	sdktranslator "github.com/router-for-me/CLIProxyAPI/v7/sdk/translator"
 	log "github.com/sirupsen/logrus"
+	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
@@ -89,7 +90,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -121,6 +122,38 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	// Provider-specific request transformations
+	// Resolve conflicts between "reasoning" object and "reasoning_effort" string
+	translated = resolveReasoningEffortConflict(translated)
+	// MiniMax models behind opencode.ai/zen/ only accept "adaptive" or "disabled"
+	// for thinking.type. Rewrite "enabled" → "adaptive" for MiniMax only.
+	translated = normalizeOpenCodeZenThinkingType(baseURL, baseModel, translated)
+	if isMiMoModel(baseModel) {
+		translated = applyMiMoReasoningBackfill(translated)
+	}
+	// Apply reasoning normalization for all providers when reasoning signals are present
+	if !isMistralProvider(e.provider) {
+		if normalized, _, errNorm := normalizeOpenAIToolCallReasoningContentWithOptions(translated, openAIReasoningNormalizationOptions{
+			requireReasoningSignal: true,
+		}); errNorm == nil {
+			translated = normalized
+		}
+	}
+	if isMistralProvider(e.provider) {
+		translated = stripMistralUnsupportedFields(translated)
+	}
+	// Strip unsupported top-level fields for DeepSeek models
+	if isDeepSeekModel(baseModel) {
+		translated = stripDeepSeekUnsupportedFields(translated)
+	}
+	if compatCfg := e.resolveCompatConfig(auth); needsToolCallIDNormalization(baseModel, compatCfg) {
+		if normalized, patched, errNorm := normalizeNVIDIAToolCallIDs(translated); patched > 0 && errNorm == nil {
+			translated = normalized
+		}
+	}
+	if compatCfg := e.resolveCompatConfig(auth); isNVIDIACompatProvider(compatCfg) {
+		translated = applyNVIDIAMaxTokensReduction(translated)
+	}
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -201,7 +234,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 func (e *OpenAICompatExecutor) executeImages(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (resp cliproxyexecutor.Response, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -294,7 +327,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -321,6 +354,38 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	// Provider-specific request transformations
+	// Resolve conflicts between "reasoning" object and "reasoning_effort" string
+	translated = resolveReasoningEffortConflict(translated)
+	// MiniMax models behind opencode.ai/zen/ only accept "adaptive" or "disabled"
+	// for thinking.type. Rewrite "enabled" → "adaptive" for MiniMax only.
+	translated = normalizeOpenCodeZenThinkingType(baseURL, baseModel, translated)
+	if isMiMoModel(baseModel) {
+		translated = applyMiMoReasoningBackfill(translated)
+	}
+	// Apply reasoning normalization for all providers when reasoning signals are present
+	if !isMistralProvider(e.provider) {
+		if normalized, _, errNorm := normalizeOpenAIToolCallReasoningContentWithOptions(translated, openAIReasoningNormalizationOptions{
+			requireReasoningSignal: true,
+		}); errNorm == nil {
+			translated = normalized
+		}
+	}
+	if isMistralProvider(e.provider) {
+		translated = stripMistralUnsupportedFields(translated)
+	}
+	// Strip unsupported top-level fields for DeepSeek models
+	if isDeepSeekModel(baseModel) {
+		translated = stripDeepSeekUnsupportedFields(translated)
+	}
+	if compatCfg := e.resolveCompatConfig(auth); needsToolCallIDNormalization(baseModel, compatCfg) {
+		if normalized, patched, errNorm := normalizeNVIDIAToolCallIDs(translated); patched > 0 && errNorm == nil {
+			translated = normalized
+		}
+	}
+	if compatCfg := e.resolveCompatConfig(auth); isNVIDIACompatProvider(compatCfg) {
+		translated = applyNVIDIAMaxTokensReduction(translated)
+	}
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
@@ -459,7 +524,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 func (e *OpenAICompatExecutor) executeImagesStream(ctx context.Context, auth *cliproxyauth.Auth, req cliproxyexecutor.Request, opts cliproxyexecutor.Options, endpointPath string) (_ *cliproxyexecutor.StreamResult, err error) {
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
-	reporter := helps.NewUsageReporter(ctx, e.Identifier(), baseModel, auth)
+	reporter := helps.NewExecutorUsageReporter(ctx, e, baseModel, auth)
 	defer reporter.TrackFailure(ctx, &err)
 
 	baseURL, apiKey := e.resolveCredentials(auth)
@@ -776,6 +841,276 @@ func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byt
 	}
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	return payload
+}
+
+// isMiMoModel reports whether the model name (after alias resolution) refers to a
+// Xiaomi MiMo-V series model that requires reasoning_content preservation in
+// multi-turn tool-call conversations.
+// Matching pattern: model name contains "mimo-v" (case-insensitive).
+func isMiMoModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "mimo-v")
+}
+
+// isDeepSeekModel reports whether the model name refers to a DeepSeek model.
+func isDeepSeekModel(model string) bool {
+	return strings.Contains(strings.ToLower(strings.TrimSpace(model)), "deepseek")
+}
+
+// stripDeepSeekUnsupportedFields removes DeepSeek-specific top-level fields that are
+// not supported by generic OpenAI-compatible providers.
+// Fields removed: reasoning, reasoningSummary, include, verbosity, interleaved, reasoning_effort
+// The "thinking" field is preserved as it's used by the thinking system.
+func stripDeepSeekUnsupportedFields(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	fields := []string{"reasoning", "reasoningSummary", "include", "verbosity", "interleaved", "reasoning_effort"}
+	out := body
+	for _, field := range fields {
+		if gjson.GetBytes(out, field).Exists() {
+			updated, err := sjson.DeleteBytes(out, field)
+			if err == nil {
+				out = updated
+			}
+		}
+	}
+	return out
+}
+
+// isMistralProvider reports whether the provider identifier corresponds to Mistral.
+func isMistralProvider(provider string) bool {
+	p := strings.ToLower(strings.TrimSpace(provider))
+	return p == "mistral" || p == "mistral.ai"
+}
+
+// resolveReasoningEffortConflict resolves conflicts between the "reasoning" object
+// and the "reasoning_effort" string field. When both exist, "reasoning" is removed
+// to avoid sending conflicting signals to the upstream provider.
+func resolveReasoningEffortConflict(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	hasReasoning := gjson.GetBytes(body, "reasoning").Exists()
+	hasReasoningEffort := gjson.GetBytes(body, "reasoning_effort").Exists()
+	if hasReasoning && hasReasoningEffort {
+		updated, err := sjson.DeleteBytes(body, "reasoning")
+		if err == nil {
+			return updated
+		}
+	}
+	return body
+}
+
+// isOpenCodeZenProvider reports whether the base URL points to the
+// opencode.ai/zen/ gateway. The Zen gateway routes to upstream providers
+// (e.g. MiniMax) that only accept "adaptive" or "disabled" for thinking.type
+// and reject "enabled".
+func isOpenCodeZenProvider(baseURL string) bool {
+	lower := strings.ToLower(strings.TrimSpace(baseURL))
+	return strings.Contains(lower, "opencode.ai/zen/")
+}
+
+// isOpenCodeZenMiniMaxModel reports whether the model name targets the
+// MiniMax-M3 upstream behind the opencode.ai/zen/ gateway. MiniMax-M3
+// only allows thinking.type "adaptive" or "disabled" and rejects "enabled".
+// Other providers behind the gateway (e.g. Claude, GPT) accept "enabled"
+// and must not be remapped.
+func isOpenCodeZenMiniMaxModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if lower == "" {
+		return false
+	}
+	// Match the specific MiniMax-M3 model name (case-insensitive).
+	return strings.Contains(lower, "minimax-m3")
+}
+
+// normalizeOpenCodeZenThinkingType rewrites thinking.type from "enabled"
+// to "adaptive" for MiniMax models served via the opencode.ai/zen/ gateway,
+// since MiniMax only allows "adaptive" or "disabled" and rejects "enabled".
+// If thinking.type is "disabled" or "adaptive", it is left untouched.
+// Non-MiniMax models are not affected, since other providers behind the
+// gateway (e.g. Claude, GPT) accept "enabled".
+func normalizeOpenCodeZenThinkingType(baseURL, model string, body []byte) []byte {
+	if !isOpenCodeZenProvider(baseURL) || !isOpenCodeZenMiniMaxModel(model) || len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
+	if thinkingType == "" || thinkingType == "disabled" || thinkingType == "adaptive" {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, "thinking.type", "adaptive")
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// needsToolCallIDNormalization reports whether the model requires 9-char alphanumeric
+// tool call ID normalization (NVIDIA, Mistral-Medium-3.5).
+func needsToolCallIDNormalization(model string, compat *config.OpenAICompatibility) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(lower, "mistral-medium-3.5") || strings.Contains(lower, "mistralai/") {
+		return true
+	}
+	if compat != nil {
+		name := strings.ToLower(compat.Name)
+		if strings.Contains(name, "nvidia") || strings.Contains(name, "nvapi") {
+			return true
+		}
+	}
+	return false
+}
+
+// isNVIDIACompatProvider reports whether the provider is an NVIDIA endpoint.
+func isNVIDIACompatProvider(compat *config.OpenAICompatibility) bool {
+	if compat == nil {
+		return false
+	}
+	name := strings.ToLower(compat.Name)
+	return strings.Contains(name, "nvidia") || strings.Contains(name, "nvapi")
+}
+
+// applyNVIDIAMaxTokensReduction reduces max_tokens by 2 for NVIDIA endpoints.
+// NVIDIA reserves 2 tokens for internal use.
+func applyNVIDIAMaxTokensReduction(body []byte) []byte {
+	if !gjson.ValidBytes(body) {
+		return body
+	}
+	mt := gjson.GetBytes(body, "max_tokens")
+	if !mt.Exists() || mt.Int() < 3 {
+		return body
+	}
+	next, err := sjson.SetBytes(body, "max_tokens", mt.Int()-2)
+	if err != nil {
+		return body
+	}
+	return next
+}
+
+// applyMiMoReasoningBackfill ensures reasoning_content is preserved or backfilled
+// for assistant messages that contain tool_calls, as required by Xiaomi MiMo-V models.
+// See: https://platform.xiaomimimo.com/docs/en-US/usage-guide/passing-back-reasoning_content
+func applyMiMoReasoningBackfill(body []byte) []byte {
+	out, _, err := normalizeOpenAIToolCallReasoningContentWithOptions(body, openAIReasoningNormalizationOptions{
+		forceForProvider:     true,
+		requireExistingChain: false,
+	})
+	if err != nil {
+		log.Debugf("openai compat executor: mimo reasoning backfill error: %v", err)
+		return body
+	}
+	return out
+}
+
+// normalizeDeltaContentArray normalizes SSE streaming delta content.
+// When delta.content is an array (e.g., from providers that send content parts),
+// extracts only "text" type parts and joins them into a single string,
+// stripping "thinking" and other non-text parts.
+func normalizeDeltaContentArray(line []byte) []byte {
+	trimmed := bytes.TrimSpace(line)
+	if len(trimmed) == 0 {
+		return line
+	}
+	// Leave non-data lines unchanged
+	if !bytes.HasPrefix(trimmed, []byte("data:")) {
+		return line
+	}
+	jsonPart := trimmed[len("data:"):]
+	jsonTrimmed := bytes.TrimSpace(jsonPart)
+	// Leave [DONE] unchanged
+	if string(jsonTrimmed) == "[DONE]" {
+		return line
+	}
+	if !gjson.ValidBytes(jsonTrimmed) {
+		return line
+	}
+	choices := gjson.GetBytes(jsonTrimmed, "choices")
+	if !choices.Exists() || !choices.IsArray() || len(choices.Array()) == 0 {
+		return line
+	}
+
+	modified := false
+	out := jsonTrimmed
+	for ci, choice := range choices.Array() {
+		content := choice.Get("delta.content")
+		if !content.Exists() {
+			continue
+		}
+		// String content: leave as-is
+		if content.Type == gjson.String {
+			continue
+		}
+		// Array content: normalize
+		if !content.IsArray() {
+			continue
+		}
+		var textParts []string
+		for _, item := range content.Array() {
+			itemType := item.Get("type").String()
+			if itemType == "text" {
+				t := item.Get("text").String()
+				if t != "" {
+					textParts = append(textParts, t)
+				}
+			}
+			// Skip "thinking" and other non-text types
+		}
+		combined := strings.Join(textParts, "")
+		next, err := sjson.SetBytes(out, fmt.Sprintf("choices.%d.delta.content", ci), combined)
+		if err != nil {
+			continue
+		}
+		out = next
+		modified = true
+	}
+	if !modified {
+		return line
+	}
+	prefix := "data: "
+	return append([]byte(prefix), out...)
+}
+
+// fixMistralMessageOrder ensures the last message before a new user turn
+// has proper Mistral prefix semantics:
+//   - If the last message is assistant without a prefix field → add prefix=true
+//   - If the last message is assistant with prefix=false → append a placeholder user message
+//   - Otherwise → leave unchanged
+func (e *OpenAICompatExecutor) fixMistralMessageOrder(payload []byte) []byte {
+	if len(payload) == 0 || !gjson.ValidBytes(payload) {
+		return payload
+	}
+	messages := gjson.GetBytes(payload, "messages")
+	if !messages.Exists() || !messages.IsArray() || len(messages.Array()) == 0 {
+		return payload
+	}
+	msgs := messages.Array()
+	lastMsg := msgs[len(msgs)-1]
+	lastRole := strings.TrimSpace(lastMsg.Get("role").String())
+	if lastRole != "assistant" {
+		return payload
+	}
+	prefix := lastMsg.Get("prefix")
+	if prefix.Exists() {
+		if prefix.Type == gjson.True {
+			// Already has prefix=true
+			return payload
+		}
+		// prefix=false: append placeholder user message
+		placeholder := []byte(`{"role":"user","content":"."}`)
+		existing := messages.Raw
+		newMessages := existing[:len(existing)-1] + "," + string(placeholder) + "]"
+		next, err := sjson.SetRawBytes(payload, "messages", []byte(newMessages))
+		if err != nil {
+			return payload
+		}
+		return next
+	}
+	// No prefix field: add prefix=true to last assistant message
+	next, err := sjson.SetBytes(payload, fmt.Sprintf("messages.%d.prefix", len(msgs)-1), true)
+	if err != nil {
+		return payload
+	}
+	return next
 }
 
 type statusErr struct {

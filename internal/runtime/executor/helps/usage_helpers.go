@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -16,27 +17,43 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
 	cliproxyauth "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/auth"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
+	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	alias       string
-	authID      string
-	authIndex   string
-	authType    string
-	apiKey      string
-	source      string
-	reasoning   string
-	serviceTier string
-	requestedAt time.Time
-	ttftMu      sync.RWMutex
-	ttft        time.Duration
-	ttftStart   time.Time
-	ttftSet     bool
-	once        sync.Once
+	provider     string
+	executorType string
+	model        string
+	alias        string
+	authID       string
+	authIndex    string
+	authType     string
+	apiKey       string
+	source       string
+	reasoning    string
+	serviceTier  string
+	requestedAt  time.Time
+	ttftMu       sync.RWMutex
+	ttft         time.Duration
+	ttftStart    time.Time
+	ttftSet      bool
+	once         sync.Once
+}
+
+type usageExecutor interface {
+	Identifier() string
+}
+
+func NewExecutorUsageReporter(ctx context.Context, executor usageExecutor, model string, auth *cliproxyauth.Auth) *UsageReporter {
+	provider := ""
+	if executor != nil {
+		provider = executor.Identifier()
+	}
+	reporter := NewUsageReporter(ctx, provider, model, auth)
+	reporter.executorType = ExecutorTypeName(executor)
+	return reporter
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -61,6 +78,17 @@ func NewUsageReporter(ctx context.Context, provider, model string, auth *cliprox
 		reporter.authIndex = auth.EnsureIndex()
 	}
 	return reporter
+}
+
+func ExecutorTypeName(executor any) string {
+	if executor == nil {
+		return ""
+	}
+	executorType := reflect.TypeOf(executor)
+	for executorType.Kind() == reflect.Pointer {
+		executorType = executorType.Elem()
+	}
+	return strings.TrimSpace(executorType.Name())
 }
 
 func (r *UsageReporter) Publish(ctx context.Context, detail usage.Detail) {
@@ -215,6 +243,25 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {
 	record.ResponseHeaders = internallogging.GetResponseHeaders(ctx)
 	usage.PublishRecord(ctx, record)
+
+	if ginCtx := ginContextFrom(ctx); ginCtx != nil && hasNonZeroTokenUsage(record.Detail) {
+		ginCtx.Set("usageDetail", &record.Detail)
+
+		// If gin_logger already emitted a log with usage (non-streaming path),
+		// no extra completion log is needed.
+		if _, alreadyLogged := ginCtx.Get("__usage_logged__"); alreadyLogged {
+			return
+		}
+
+		// Streaming path: gin_logger already logged without usage.
+		// Emit a completion log with the same request_id for correlation.
+		requestID := internallogging.GetRequestID(ctx)
+		if requestID != "" {
+			log.WithField("request_id", requestID).
+				Debugf("[stream-complete] tokens in=%d out=%d cached=%d",
+					record.Detail.InputTokens, record.Detail.OutputTokens, record.Detail.CachedTokens)
+		}
+	}
 }
 
 func (r *UsageReporter) buildRecord(detail usage.Detail, failed bool, failures ...usage.Failure) usage.Record {
@@ -234,6 +281,7 @@ func (r *UsageReporter) buildRecordForModel(model string, detail usage.Detail, f
 	}
 	return usage.Record{
 		Provider:        r.provider,
+		ExecutorType:    r.executorType,
 		Model:           model,
 		Alias:           r.alias,
 		Source:          r.source,
