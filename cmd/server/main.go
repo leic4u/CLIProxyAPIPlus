@@ -24,11 +24,14 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/cmd"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/homeplugins"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/safemode"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/tui"
@@ -67,6 +70,16 @@ func setKiroIncognitoMode(cfg *config.Config, useIncognito, noIncognito bool) {
 	}
 }
 
+func shouldStartExampleAPIKeyWarningServer(cfg *config.Config, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode bool) bool {
+	if cfg == nil || commandMode || homeMode || cloudConfigMissing {
+		return false
+	}
+	if tuiMode && !standalone {
+		return false
+	}
+	return safemode.HasExampleAPIKeys(cfg.APIKeys)
+}
+
 // main is the entry point of the application.
 // It parses command-line flags, loads configuration, and starts the appropriate
 // service based on the provided flags (login, codex-login, or server mode).
@@ -101,9 +114,6 @@ func main() {
 	var githubCopilotLogin bool
 	var clineLogin bool
 	var codeBuddyLogin bool
-	var qoderLogin bool
-	var qoderImport bool
-	var qoderPAT string
 	var projectID string
 	var vertexImport string
 	var vertexImportPrefix string
@@ -147,9 +157,6 @@ func main() {
 	flag.BoolVar(&githubCopilotLogin, "github-copilot-login", false, "Login to GitHub Copilot using device flow")
 	flag.BoolVar(&clineLogin, "cline-login", false, "Login to Cline using OAuth")
 	flag.BoolVar(&codeBuddyLogin, "codebuddy-login", false, "Login to CodeBuddy using browser OAuth flow")
-	flag.BoolVar(&qoderLogin, "qoder-login", false, "Login to Qoder using OAuth device flow + PKCE")
-	flag.BoolVar(&qoderImport, "qoder-import", false, "Import Qoder credentials from ~/.qoder/.auth/user (or ~/.qoderwork/.auth/user)")
-	flag.StringVar(&qoderPAT, "qoder-pat", "", "Authenticate to Qoder with a personal access token (skips device flow)")
 	flag.StringVar(&projectID, "project_id", "", "Project ID (Gemini only, not required)")
 	flag.StringVar(&configPath, "config", DefaultConfigPath, "Configure File Path")
 	flag.StringVar(&vertexImport, "vertex-import", "", "Import Vertex service account key JSON file")
@@ -188,6 +195,12 @@ func main() {
 		})
 	}
 
+	pluginHost := pluginhost.New()
+	if bootstrapCfg := loadPluginBootstrapConfig(pluginBootstrapConfigPath(os.Args[1:], DefaultConfigPath)); bootstrapCfg != nil {
+		pluginHost.ApplyConfig(context.Background(), bootstrapCfg)
+		pluginHost.RegisterCommandLineFlags(context.Background(), flag.CommandLine)
+	}
+
 	// Parse the command-line flags.
 	flag.Parse()
 
@@ -196,6 +209,8 @@ func main() {
 	var cfg *config.Config
 	var isCloudDeploy bool
 	var configLoadedFromHome bool
+	var homeClient *home.Client
+	var homePluginSyncReport homeplugins.SyncReport
 	var (
 		usePostgresStore     bool
 		pgStoreDSN           string
@@ -325,7 +340,7 @@ func main() {
 		if homeDisableClusterDiscovery {
 			homeCfg.DisableClusterDiscovery = true
 		}
-		homeClient := home.New(homeCfg)
+		homeClient = home.New(homeCfg)
 		defer homeClient.Close()
 
 		ctxHomeConfig, cancelHomeConfig := context.WithTimeout(context.Background(), 30*time.Second)
@@ -347,6 +362,20 @@ func main() {
 		parsed.Home = homeCfg
 		parsed.Port = 8317 // Default to 8317 for home mode, can be overridden by home config
 		parsed.UsageStatisticsEnabled = true
+		ctxHomePlugins, cancelHomePlugins := context.WithTimeout(context.Background(), 30*time.Second)
+		var errHomePlugins error
+		homePluginSyncReport, errHomePlugins = homeplugins.SyncWithReport(ctxHomePlugins, parsed, pluginHost)
+		cancelHomePlugins()
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, homeCfg.NodeID, homePluginSyncReport)
+		if errHomePlugins != nil {
+			log.Errorf("failed to fetch plugins from home: %v", errHomePlugins)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin sync status: %v", errReportPlugins)
+		}
+		if errHomePlugins != nil {
+			return
+		}
 		cfg = parsed
 
 		// Keep a non-empty config path for downstream components (log paths, management assets, etc),
@@ -549,6 +578,7 @@ func main() {
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	coreauth.SetTransientErrorCooldownSeconds(cfg.TransientErrorCooldownSeconds)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)
@@ -574,6 +604,16 @@ func main() {
 		CallbackPort: oauthCallbackPort,
 	}
 
+	commandMode := vertexImport != "" || login || antigravityLogin || codexLogin || codexDeviceLogin || claudeLogin || kimiLogin || xaiLogin
+	cloudConfigMissing := isCloudDeploy && !configFileExists
+	homeMode := configLoadedFromHome || (cfg != nil && cfg.Home.Enabled)
+	if shouldStartExampleAPIKeyWarningServer(cfg, commandMode, tuiMode, standalone, cloudConfigMissing, homeMode) {
+		matches := safemode.ExampleAPIKeys(cfg.APIKeys)
+		log.WithField("api_keys", strings.Join(matches, ",")).Error("unsafe example API key configured; starting warning-only server")
+		cmd.StartExampleAPIKeyWarningServer(cfg, configFilePath, matches)
+		return
+	}
+
 	// Register the shared token store once so all components use the same persistence backend.
 	if usePostgresStore {
 		sdkAuth.RegisterTokenStore(pgStoreInst)
@@ -587,6 +627,28 @@ func main() {
 
 	// Register built-in access providers before constructing services.
 	configaccess.Register(&cfg.SDKConfig)
+	pluginHost.ApplyConfig(context.Background(), cfg)
+	if configLoadedFromHome {
+		errHomePluginLoad := homeplugins.MarkLoadResults(&homePluginSyncReport, pluginHost)
+		errReportPlugins := home.ReportPluginStatus(context.Background(), homeClient, cfg.Home.NodeID, homePluginSyncReport)
+		if errHomePluginLoad != nil {
+			log.Errorf("failed to load home plugins: %v", errHomePluginLoad)
+		}
+		if errReportPlugins != nil {
+			log.Warnf("failed to report home plugin load status: %v", errReportPlugins)
+		}
+		if errHomePluginLoad != nil {
+			return
+		}
+	}
+	if pluginHost.HasTriggeredCommandLineFlags() {
+		if exitCode, handled := pluginHost.ExecuteCommandLine(context.Background(), os.Args[0], os.Args[1:], configFilePath, flag.CommandLine); handled {
+			if exitCode != 0 {
+				os.Exit(exitCode)
+			}
+			return
+		}
+	}
 
 	// Handle different command modes based on the provided flags.
 
@@ -664,13 +726,6 @@ func main() {
 		setKiroIncognitoMode(cfg, useIncognito, noIncognito)
 		kiro.InitFingerprintConfig(cfg)
 		cmd.DoKiroIDCLogin(cfg, options, kiroIDCStartURL, kiroIDCRegion, kiroIDCFlow)
-	} else if qoderLogin {
-		if qoderPAT != "" {
-			options.PersonalToken = qoderPAT
-		}
-		cmd.DoQoderLogin(cfg, options)
-	} else if qoderImport {
-		cmd.DoQoderImport(cfg, options)
 	} else {
 		// In cloud deploy mode without config file, just wait for shutdown signals
 		if isCloudDeploy && !configFileExists {
@@ -720,7 +775,7 @@ func main() {
 					password = localMgmtPassword
 				}
 
-				cancel, done := cmd.StartServiceBackground(cfg, configFilePath, password)
+				cancel, done := cmd.StartServiceBackgroundWithPluginHost(cfg, configFilePath, password, pluginHost)
 
 				client := tui.NewClient(cfg.Port, password)
 				ready := false
@@ -776,6 +831,65 @@ func main() {
 			}
 
 			cmd.StartService(cfg, configFilePath, password)
+
+			cmd.StartServiceWithPluginHost(cfg, configFilePath, password, pluginHost)
+
 		}
 	}
+}
+
+func pluginBootstrapConfigPath(args []string, defaultPath string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--":
+			return defaultPluginBootstrapConfigPath(defaultPath)
+		case arg == "-config" || arg == "--config":
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return defaultPluginBootstrapConfigPath(defaultPath)
+		case strings.HasPrefix(arg, "-config="):
+			return strings.TrimPrefix(arg, "-config=")
+		case strings.HasPrefix(arg, "--config="):
+			return strings.TrimPrefix(arg, "--config=")
+		}
+	}
+	return defaultPluginBootstrapConfigPath(defaultPath)
+}
+
+func defaultPluginBootstrapConfigPath(defaultPath string) string {
+	if strings.TrimSpace(defaultPath) != "" {
+		return defaultPath
+	}
+	wd, errGetwd := os.Getwd()
+	if errGetwd != nil {
+		return "config.yaml"
+	}
+	return filepath.Join(wd, "config.yaml")
+}
+
+func loadPluginBootstrapConfig(path string) *config.Config {
+	raw, errReadFile := os.ReadFile(path)
+	if errReadFile != nil {
+		if !errors.Is(errReadFile, os.ErrNotExist) {
+			log.Warnf("failed to read plugin bootstrap config: %v", errReadFile)
+		}
+		cfg := &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		cfg := &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	cfg, errParseConfig := config.ParseConfigBytes(raw)
+	if errParseConfig != nil {
+		log.Warnf("failed to parse plugin bootstrap config: %v", errParseConfig)
+		cfg = &config.Config{}
+		cfg.NormalizePluginsConfig()
+		return cfg
+	}
+	return cfg
 }

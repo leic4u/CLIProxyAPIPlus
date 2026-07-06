@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -30,7 +31,6 @@ func writeTestConfigFile(t *testing.T) string {
 
 func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -56,9 +56,50 @@ func TestDeleteGeminiKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	}
 }
 
+func TestPutCommandCodeKeys_PreservesEmptyBaseURLForDefaultEndpoint(t *testing.T) {
+	t.Parallel()
+
+	h := &Handler{
+		cfg:            &config.Config{},
+		configFilePath: writeTestConfigFile(t),
+	}
+
+	body := []byte(`[{
+		"api-key": " user_default ",
+		"base-url": " ",
+		"models": [{"name": " upstream-model ", "alias": " alias-model "}]
+	}]`)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPut, "/v0/management/commandcode-api-key", bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	h.PutCommandCodeKeys(c)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	if got := len(h.cfg.CommandCodeKey); got != 1 {
+		t.Fatalf("commandcode keys len = %d, want 1", got)
+	}
+	entry := h.cfg.CommandCodeKey[0]
+	if entry.APIKey != "user_default" {
+		t.Fatalf("APIKey = %q, want %q", entry.APIKey, "user_default")
+	}
+	if entry.BaseURL != "" {
+		t.Fatalf("BaseURL = %q, want empty default", entry.BaseURL)
+	}
+	if got := entry.Models[0].Name; got != "upstream-model" {
+		t.Fatalf("Models[0].Name = %q, want %q", got, "upstream-model")
+	}
+	if got := entry.Models[0].Alias; got != "alias-model" {
+		t.Fatalf("Models[0].Alias = %q, want %q", got, "alias-model")
+	}
+}
+
 func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -89,7 +130,6 @@ func TestDeleteGeminiKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 
 func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -120,7 +160,6 @@ func TestDeleteClaudeKey_DeletesEmptyBaseURLWhenExplicitlyProvided(t *testing.T)
 
 func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{
@@ -151,7 +190,6 @@ func TestDeleteVertexCompatKey_DeletesOnlyMatchingBaseURL(t *testing.T) {
 
 func TestDeleteCodexKey_RequiresBaseURLWhenAPIKeyDuplicated(t *testing.T) {
 	t.Parallel()
-	gin.SetMode(gin.TestMode)
 
 	h := &Handler{
 		cfg: &config.Config{

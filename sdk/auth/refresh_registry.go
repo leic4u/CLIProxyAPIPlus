@@ -9,15 +9,12 @@ import (
 func init() {
 	registerRefreshLead("codex", func() Authenticator { return NewCodexAuthenticator() })
 	registerRefreshLead("claude", func() Authenticator { return NewClaudeAuthenticator() })
-	registerRefreshLead("gemini", func() Authenticator { return NewGeminiAuthenticator() })
-	registerRefreshLead("gemini-cli", func() Authenticator { return NewGeminiAuthenticator() })
 	registerRefreshLead("antigravity", func() Authenticator { return NewAntigravityAuthenticator() })
 	registerRefreshLead("kimi", func() Authenticator { return NewKimiAuthenticator() })
 	registerRefreshLead("xai", func() Authenticator { return NewXAIAuthenticator() })
 	registerRefreshLead("kiro", func() Authenticator { return NewKiroAuthenticator() })
 	registerRefreshLead("github-copilot", func() Authenticator { return NewGitHubCopilotAuthenticator() })
 	registerRefreshLead("gitlab", func() Authenticator { return NewGitLabAuthenticator() })
-	registerRefreshLead("qoder", func() Authenticator { return NewQoderAuthenticator() })
 	registerRefreshLead("codebuddy", func() Authenticator { return NewCodeBuddyAuthenticator() })
 	registerRefreshLead("cursor", func() Authenticator { return NewCursorAuthenticator() })
 }

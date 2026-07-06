@@ -12,6 +12,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	sigcompat "github.com/router-for-me/CLIProxyAPI/v7/internal/signature"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/thinking"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -170,6 +171,15 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 
 	// input array processing
 	var pendingReasoningParts []string
+	type pendingToolUseMessage struct {
+		callID string
+		raw    []byte
+	}
+	var pendingToolUseMessages []pendingToolUseMessage
+	seenToolUseCallIDs := map[string]bool{}
+	appendMessage := func(msg []byte) {
+		out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+	}
 	flushPendingReasoning := func() {
 		if len(pendingReasoningParts) == 0 {
 			return
@@ -178,8 +188,27 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 		for _, partJSON := range pendingReasoningParts {
 			asst, _ = sjson.SetRawBytes(asst, "content.-1", []byte(partJSON))
 		}
-		out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+		appendMessage(asst)
 		pendingReasoningParts = nil
+	}
+	flushPendingToolUses := func() {
+		for _, pending := range pendingToolUseMessages {
+			appendMessage(pending.raw)
+		}
+		pendingToolUseMessages = nil
+	}
+	flushPendingToolUseFor := func(callID string) {
+		if len(pendingToolUseMessages) == 0 {
+			return
+		}
+		for i, pending := range pendingToolUseMessages {
+			if pending.callID == callID {
+				appendMessage(pending.raw)
+				pendingToolUseMessages = append(pendingToolUseMessages[:i], pendingToolUseMessages[i+1:]...)
+				return
+			}
+		}
+		flushPendingToolUses()
 	}
 
 	if input := root.Get("input"); input.Exists() && input.IsArray() {
@@ -294,6 +323,9 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 
 				hasReasoningParts := false
+				if role != "assistant" {
+					flushPendingToolUses()
+				}
 				if len(pendingReasoningParts) > 0 {
 					if role == "assistant" {
 						if len(partsJSON) == 0 && textAggregate.Len() > 0 {
@@ -322,12 +354,12 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 							msg, _ = sjson.SetRawBytes(msg, "content.-1", []byte(partJSON))
 						}
 					}
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
 				} else if textAggregate.Len() > 0 || role == "system" {
 					msg := []byte(`{"role":"","content":""}`)
 					msg, _ = sjson.SetBytes(msg, "role", role)
 					msg, _ = sjson.SetBytes(msg, "content", textAggregate.String())
-					out, _ = sjson.SetRawBytes(out, "messages.-1", msg)
+					appendMessage(msg)
 				}
 
 			case "reasoning":
@@ -341,6 +373,8 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				if callID == "" {
 					callID = genToolCallID()
 				}
+				callID = util.SanitizeClaudeToolID(callID)
+				seenToolUseCallIDs[callID] = true
 				name := item.Get("name").String()
 				argsStr := item.Get("arguments").String()
 
@@ -360,25 +394,49 @@ func ConvertOpenAIResponsesRequestToClaude(modelName string, inputRawJSON []byte
 				}
 				pendingReasoningParts = nil
 				asst, _ = sjson.SetRawBytes(asst, "content.-1", toolUse)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", asst)
+				pendingToolUseMessages = append(pendingToolUseMessages, pendingToolUseMessage{
+					callID: callID,
+					raw:    asst,
+				})
 
 			case "function_call_output":
 				flushPendingReasoning()
-				// Map to user tool_result
+				// Map to user tool_result when the matching tool_use exists in the
+				// request history. Anthropic rejects orphan tool_result blocks, so
+				// preserve unmatched outputs as text instead of sending invalid tool
+				// content.
 				callID := item.Get("call_id").String()
+				callID = util.SanitizeClaudeToolID(callID)
 				outputStr := item.Get("output").String()
+				if !seenToolUseCallIDs[callID] {
+					usr := []byte(`{"role":"user","content":""}`)
+					usr, _ = sjson.SetBytes(usr, "content", fmt.Sprintf("[tool_result without adjacent tool_use: %s]\n%s", callID, outputStr))
+					appendMessage(usr)
+					break
+				}
+
+				flushPendingToolUseFor(callID)
 				toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":""}`)
 				toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", callID)
 				toolResult, _ = sjson.SetBytes(toolResult, "content", outputStr)
 
 				usr := []byte(`{"role":"user","content":[]}`)
 				usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
-				out, _ = sjson.SetRawBytes(out, "messages.-1", usr)
+				appendMessage(usr)
 			}
 			return true
 		})
 	}
 	flushPendingReasoning()
+	for _, pending := range pendingToolUseMessages {
+		appendMessage(pending.raw)
+		toolResult := []byte(`{"type":"tool_result","tool_use_id":"","content":"[missing tool_result for this tool_use in conversation history]","is_error":true}`)
+		toolResult, _ = sjson.SetBytes(toolResult, "tool_use_id", pending.callID)
+		usr := []byte(`{"role":"user","content":[]}`)
+		usr, _ = sjson.SetRawBytes(usr, "content.-1", toolResult)
+		appendMessage(usr)
+	}
+	pendingToolUseMessages = nil
 
 	includedToolNames := map[string]struct{}{}
 	toolNameMap := map[string]string{}
@@ -484,6 +542,9 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 			return [][]byte{tJSON}
 		}
 	default:
+		if isOpenAIResponsesApplyPatchCustomTool(toolType, tool) {
+			return nil
+		}
 		if isUnsupportedOpenAIBuiltinToolType(toolType) {
 			return nil
 		}
@@ -492,6 +553,10 @@ func convertResponsesToolToClaudeTools(tool gjson.Result, toolNameMap map[string
 		}
 	}
 	return nil
+}
+
+func isOpenAIResponsesApplyPatchCustomTool(toolType string, tool gjson.Result) bool {
+	return toolType == "custom" && strings.TrimSpace(tool.Get("name").String()) == "apply_patch"
 }
 
 func convertResponsesNamespaceToolToClaude(tool gjson.Result, toolNameMap map[string]string) [][]byte {
@@ -620,6 +685,51 @@ func qualifyResponsesNamespaceToolName(namespaceName, childName string) string {
 		return namespaceName + childName
 	}
 	return namespaceName + "__" + childName
+}
+
+func splitResponsesQualifiedFunctionCallFromRequest(requestRawJSON []byte, qualifiedName string) (name, namespace string) {
+	qualifiedName = strings.TrimSpace(qualifiedName)
+	if qualifiedName == "" {
+		return "", ""
+	}
+
+	tools := gjson.GetBytes(requestRawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return qualifiedName, ""
+	}
+
+	var bestNamespace string
+	var bestChild string
+	tools.ForEach(func(_, tool gjson.Result) bool {
+		if strings.TrimSpace(tool.Get("type").String()) != "namespace" {
+			return true
+		}
+		namespaceName := strings.TrimSpace(tool.Get("name").String())
+		if namespaceName == "" {
+			return true
+		}
+		children := tool.Get("tools")
+		if !children.Exists() || !children.IsArray() {
+			return true
+		}
+		children.ForEach(func(_, child gjson.Result) bool {
+			childName := responsesToolName(child)
+			if childName == "" {
+				return true
+			}
+			if qualifyResponsesNamespaceToolName(namespaceName, childName) == qualifiedName {
+				bestNamespace = namespaceName
+				bestChild = childName
+			}
+			return true
+		})
+		return true
+	})
+
+	if bestNamespace == "" || bestChild == "" {
+		return qualifiedName, ""
+	}
+	return bestChild, bestNamespace
 }
 
 func isUnsupportedOpenAIBuiltinToolType(toolType string) bool {

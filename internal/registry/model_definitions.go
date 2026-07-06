@@ -7,6 +7,7 @@ import (
 )
 
 const (
+	codexBuiltinImage15ModelID      = "gpt-image-1.5"
 	codexBuiltinImageModelID        = "gpt-image-2"
 	xaiBuiltinImageModelID          = "grok-imagine-image"
 	xaiBuiltinImageQualityModelID   = "grok-imagine-image-quality"
@@ -19,7 +20,6 @@ type staticModelsJSON struct {
 	Claude      []*ModelInfo `json:"claude"`
 	Gemini      []*ModelInfo `json:"gemini"`
 	Vertex      []*ModelInfo `json:"vertex"`
-	GeminiCLI   []*ModelInfo `json:"gemini-cli"`
 	AIStudio    []*ModelInfo `json:"aistudio"`
 	CodexFree   []*ModelInfo `json:"codex-free"`
 	CodexTeam   []*ModelInfo `json:"codex-team"`
@@ -43,11 +43,6 @@ func GetGeminiModels() []*ModelInfo {
 // GetGeminiVertexModels returns Gemini model definitions for Vertex AI.
 func GetGeminiVertexModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Vertex)
-}
-
-// GetGeminiCLIModels returns Gemini model definitions for the Gemini CLI.
-func GetGeminiCLIModels() []*ModelInfo {
-	return cloneModelInfos(getModels().GeminiCLI)
 }
 
 // GetAIStudioModels returns model definitions for AI Studio.
@@ -85,152 +80,34 @@ func GetAntigravityModels() []*ModelInfo {
 	return cloneModelInfos(getModels().Antigravity)
 }
 
+// AntigravityWebSearchModelFor returns the Antigravity model that should run a
+// native web search request for modelID.
+func AntigravityWebSearchModelFor(modelID string) string {
+	modelID = normalizeAntigravityCapabilityModelID(modelID)
+	if modelID == "" {
+		return ""
+	}
+	for _, model := range GetGlobalRegistry().GetAvailableModelsByProvider("antigravity") {
+		if model == nil {
+			continue
+		}
+		currentModelID := normalizeAntigravityCapabilityModelID(model.ID)
+		if currentModelID == "" {
+			continue
+		}
+		if currentModelID == modelID {
+			if model.SupportsWebSearch {
+				return currentModelID
+			}
+			return ""
+		}
+	}
+	return ""
+}
+
 // GetXAIModels returns the standard xAI Grok model definitions.
 func GetXAIModels() []*ModelInfo {
 	return WithXAIBuiltins(cloneModelInfos(getModels().XAI))
-}
-
-
-// GetQoderModels returns the available models for the Qoder OAuth provider.
-// The Qoder API accepts short model IDs (lite, auto, efficient, …) over an
-// OpenAI-compatible endpoint; the registry stores the prefixed "qoder-*"
-// variant so the IDs do not collide with other providers.
-func GetQoderModels() []*ModelInfo {
-	now := int64(1748044800) // 2025-05-24
-	return []*ModelInfo{
-		{
-			ID:                  "qoder-lite",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Lite",
-			Description:         "Qoder Lite (free tier)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-auto",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Auto",
-			Description:         "Automatic model selection by Qoder",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-efficient",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Efficient",
-			Description:         "Qoder Efficient (0.3x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-performance",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Performance",
-			Description:         "Qoder Performance (1.1x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-ultimate",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Ultimate",
-			Description:         "Qoder Ultimate (1.6x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-q35model_preview",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Qwen3.6 Plus Preview",
-			Description:         "Qwen3.6 Plus Preview via Qoder",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-qmodel",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Qwen Coder 1.0",
-			Description:         "Qwen-Coder-Qoder 1.0 via Qoder (0.2x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-q35model",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Qwen3.5 Plus",
-			Description:         "Qwen3.5 Plus via Qoder (0.2x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-gmodel",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder GLM-5",
-			Description:         "GLM-5 via Qoder (0.5x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-kmodel",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder Kimi K2.5",
-			Description:         "Kimi K2.5 via Qoder (0.3x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-		{
-			ID:                  "qoder-mmodel",
-			Object:              "model",
-			Created:             now,
-			OwnedBy:             "qoder",
-			Type:                "qoder",
-			DisplayName:         "Qoder MiniMax M2.7",
-			Description:         "MiniMax M2.7 via Qoder (0.2x credit)",
-			ContextLength:       200000,
-			MaxCompletionTokens: 32768,
-			SupportedEndpoints:  []string{"/chat/completions"},
-		},
-	}
 }
 
 
@@ -367,13 +244,33 @@ func GetCodeBuddyModels() []*ModelInfo {
 // not depend on remote models.json updates. Built-ins replace any matching IDs
 // already present in the provided slice.
 func WithCodexBuiltins(models []*ModelInfo) []*ModelInfo {
-	return upsertModelInfos(models, codexBuiltinImageModelInfo())
+	return upsertModelInfos(models, codexBuiltinImage15ModelInfo(), codexBuiltinImageModelInfo())
 }
 
 // WithXAIBuiltins injects hard-coded xAI image/video model definitions that should
 // not depend on remote models.json updates.
 func WithXAIBuiltins(models []*ModelInfo) []*ModelInfo {
 	return upsertModelInfos(models, xaiBuiltinImageModelInfo(), xaiBuiltinImageQualityModelInfo(), xaiBuiltinVideoModelInfo(), xaiBuiltinVideo15PreviewModelInfo())
+}
+
+func normalizeAntigravityCapabilityModelID(modelID string) string {
+	modelID = strings.ToLower(strings.TrimSpace(modelID))
+	if open := strings.LastIndex(modelID, "("); open >= 0 && strings.HasSuffix(modelID, ")") {
+		modelID = strings.TrimSpace(modelID[:open])
+	}
+	return modelID
+}
+
+func codexBuiltinImage15ModelInfo() *ModelInfo {
+	return &ModelInfo{
+		ID:          codexBuiltinImage15ModelID,
+		Object:      "model",
+		Created:     1704067200, // 2024-01-01
+		OwnedBy:     "openai",
+		Type:        "openai",
+		DisplayName: "GPT Image 1.5",
+		Version:     codexBuiltinImage15ModelID,
+	}
 }
 
 func codexBuiltinImageModelInfo() *ModelInfo {
@@ -533,7 +430,6 @@ func cloneModelInfos(models []*ModelInfo) []*ModelInfo {
 //   - claude
 //   - gemini
 //   - vertex
-//   - gemini-cli
 //   - aistudio
 //   - codex
 //   - kimi
@@ -552,8 +448,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetGeminiModels()
 	case "vertex":
 		return GetGeminiVertexModels()
-	case "gemini-cli":
-		return GetGeminiCLIModels()
 	case "aistudio":
 		return GetAIStudioModels()
 	case "codex":
@@ -572,8 +466,6 @@ func GetStaticModelDefinitionsByChannel(channel string) []*ModelInfo {
 		return GetAntigravityModels()
 	case "codebuddy":
 		return GetCodeBuddyModels()
-	case "qoder":
-		return GetQoderModels()
 	case "cursor":
 		return GetCursorModels()
 	case "xai", "x-ai", "grok":
@@ -607,7 +499,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		data.Claude,
 		data.Gemini,
 		data.Vertex,
-		data.GeminiCLI,
 		data.AIStudio,
 		data.CodexPro,
 		data.Kimi,
@@ -617,7 +508,6 @@ func LookupStaticModelInfo(modelID string) *ModelInfo {
 		GetKiloModels(),
 		GetAmazonQModels(),
 		GetCodeBuddyModels(),
-		GetQoderModels(),
 		GetCursorModels(),
 		data.XAI,
 	}

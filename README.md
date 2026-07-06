@@ -22,14 +22,12 @@ It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
 
 So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
 
-
 ## Overview
 
 - OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
-- Amp CLI and IDE extensions support with provider routing
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
@@ -104,26 +102,6 @@ Standalone persistence and visualization service for CLIProxyAPI, with periodic 
 
 Full CLIProxyAPI management center with request-level monitoring and cost estimates. CPA-Manager tracks collected requests by account, model, channel, latency, status, and token usage; estimates cost with editable model prices and one-click LiteLLM price sync; persists events in SQLite; and provides Codex account-pool operations with batch inspection, quota detection, unhealthy account discovery, cleanup suggestions, and one-click execution for day-to-day multi-account maintenance.
 
-## Amp CLI Support
-
-CLIProxyAPI includes integrated support for [Amp CLI](https://ampcode.com) and Amp IDE extensions, enabling you to use your Google/ChatGPT/Claude OAuth subscriptions with Amp's coding tools:
-
-- Provider route aliases for Amp's API patterns (`/api/provider/{provider}/v1...`)
-- Management proxy for OAuth authentication and account features
-- Smart model fallback with automatic routing
-- **Model mapping** to route unavailable models to alternatives (e.g., `claude-opus-4.5` → `claude-sonnet-4`)
-- Security-first design with localhost-only management endpoints
-
-When you need the request/response shape of a specific backend family, use the provider-specific paths instead of the merged `/v1/...` endpoints:
-
-- Use `/api/provider/{provider}/v1/messages` for messages-style backends.
-- Use `/api/provider/{provider}/v1beta/models/...` for model-scoped generate endpoints.
-- Use `/api/provider/{provider}/v1/chat/completions` for chat-completions backends.
-
-These routes help you select the protocol surface, but they do not by themselves guarantee a unique inference executor when the same client-visible model name is reused across multiple backends. Inference routing is still resolved from the request model/alias. For strict backend pinning, use unique aliases, prefixes, or otherwise avoid overlapping client-visible model names.
-
-**→ [Complete Amp CLI Integration Guide](https://help.router-for.me/agent-client/amp-cli.html)**
-
 ## SDK Docs
 
 - Usage: [docs/sdk-usage.md](docs/sdk-usage.md)
@@ -131,6 +109,10 @@ These routes help you select the protocol surface, but they do not by themselves
 - Access: [docs/sdk-access.md](docs/sdk-access.md)
 - Watcher: [docs/sdk-watcher.md](docs/sdk-watcher.md)
 - Custom Provider Example: `examples/custom-provider`
+
+## Integrations
+
+- **GitLab Duo provider**: [docs/gitlab-duo.md](docs/gitlab-duo.md) — use GitLab Duo as a first-class provider
 
 ## Contributing
 
@@ -161,10 +143,6 @@ CLI wrapper for instant switching between multiple Claude accounts and alternati
 ### [Quotio](https://github.com/nguyenphutrong/quotio)
 
 Native macOS menu bar app that unifies Claude, Gemini, OpenAI, and Antigravity subscriptions with real-time quota tracking and smart auto-failover for AI coding tools like Claude Code, OpenCode, and Droid - no API keys needed.
-
-### [CodMate](https://github.com/loocor/CodMate)
-
-Native macOS SwiftUI app for managing CLI AI sessions (Codex, Claude Code, Gemini CLI) with unified provider management, Git review, project organization, global search, and terminal integration. Integrates CLIProxyAPI to provide OAuth authentication for Codex, Claude, Gemini, and Antigravity, with built-in and third-party provider rerouting through a single proxy endpoint - no API keys needed for OAuth providers.
 
 ### [ProxyPilot](https://github.com/Finesssee/ProxyPilot)
 
@@ -213,10 +191,6 @@ Cross-platform desktop app (macOS, Windows, Linux) wrapping CLIProxyAPI with a n
 
 Ready-to-use cross-platform quota inspector for CLIProxyAPI, supporting per-account codex 5h/7d quota windows, plan-based sorting, status coloring, and multi-account summary analytics.
 
-### [CodexCliPlus](https://github.com/C4AL/CodexCliPlus)
-
-Windows-focused, local-first desktop management platform for Codex CLI built on CLIProxyAPI, focused on simplifying local setup, account and runtime management, and providing a more complete Codex CLI experience for local users.
-
 ### [CLIProxy Pool Watch](https://github.com/murasame612/CLIProxyPoolWidget)
 
 Native macOS SwiftUI app for monitoring ChatGPT/Codex account quotas in CLIProxyAPI pools. Displays account availability, Plus-base capacity, 5-hour and weekly quota bars, plan weights, and restore forecasts through the Management API.
@@ -225,8 +199,20 @@ Native macOS SwiftUI app for monitoring ChatGPT/Codex account quotas in CLIProxy
 
 Multi-agent orchestration for AI coding assistants. Runs CLIProxyAPI as a local sidecar so its agents can drive GPT models through a ChatGPT subscription, pointing Claude Code at an Anthropic-compatible endpoint with no OpenAI API key required.
 
+### [Tunnel Agent](https://github.com/Villoh/tunnel-agent)
+
+Windows desktop UI that manages CLIProxyAPI and Perplexity WebUI Scraper from a single interface, inspired by Quotio and VibeProxy. Connect OAuth providers (Claude, Gemini CLI, Codex, Kimi, Antigravity), custom API keys, and Perplexity session accounts, then point any coding agent at the local endpoint.
+
 > [!NOTE]
 > The projects listed above integrate with upstream CLIProxyAPI. Compatibility with this fork is not guaranteed for all features.
+
+### [Quotio Desktop](https://github.com/xiaocoss/quotio-desktop)
+
+Cross-platform (Tauri) port of Quotio for Windows, macOS and Linux. Manages a pool of AI accounts (Codex, Claude Code, GitHub Copilot, Gemini CLI, Antigravity, Kiro, Cursor, Trae, GLM) through CLIProxyAPI, with per-account 5-hour/weekly quota bars, Codex rate-limit reset credits with one-click reset, smart scheduling, usage statistics, and multi-instance Codex — no API keys needed.
+
+### [Universal Chat Provider](https://github.com/maxdewald/vscode-universal-chat-provider)
+
+VS Code extension that brings your Claude, ChatGPT/Codex, Antigravity, Grok, and Kimi subscriptions into GitHub Copilot Chat as native language models — and can power your Git commit messages, chat titles, and summaries too. Runs CLIProxyAPI in a fully managed background lifecycle (download, verify, supervise) shared across all windows, so it's zero-setup. No API keys needed, just OAuth.
 
 > [!NOTE]  
 > If you developed a project based on CLIProxyAPI, please open a PR to add it to this list.

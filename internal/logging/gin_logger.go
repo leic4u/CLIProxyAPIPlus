@@ -24,6 +24,7 @@ import (
 
 	log "github.com/sirupsen/logrus"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // aiAPIPrefixes defines path prefixes for AI API requests that should have request ID tracking.
@@ -34,8 +35,9 @@ var aiAPIPrefixes = []string{
 	"/v1/videos",
 	"/v1/messages",
 	"/v1/responses",
+	"/openai/v1/videos",
 	"/v1beta/models/",
-	"/api/provider/",
+	"/backend-api/codex/",
 }
 
 const (
@@ -81,6 +83,36 @@ func formatDetailedLogBody(cfg *config.Config, body []byte) string {
 	formatted := strings.ToValidUTF8(string(body), "�")
 	formatted = truncateDetailedAPILogBody(formatted, detailedAPILogBodyLimit(cfg))
 	return strconv.QuoteToASCII(formatted)
+}
+
+func formatDetailedRequestLogBody(cfg *config.Config, path string, body []byte) string {
+	return formatDetailedLogBody(cfg, redactAccessLogRequestBody(path, body))
+}
+
+func redactAccessLogRequestBody(path string, body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	var fields []string
+	switch {
+	case strings.HasPrefix(path, "/v1/chat/completions"):
+		fields = []string{"messages"}
+	case strings.HasPrefix(path, "/v1/responses"):
+		fields = []string{"instructions"}
+	default:
+		return body
+	}
+
+	redacted := body
+	for _, field := range fields {
+		next, errDelete := sjson.DeleteBytes(redacted, field)
+		if errDelete != nil {
+			return body
+		}
+		redacted = next
+	}
+	return redacted
 }
 
 func getProviderAuthFromContext(c *gin.Context) (provider, authID, authLabel string) {
@@ -299,8 +331,7 @@ func GinLogrusLogger(cfg *config.Config) gin.HandlerFunc {
 
 		if isAIAPIPath(path) && (modelName != "" || providerInfo != "" || authKeyName != "") {
 			displayModelName := modelName
-			requestedMatchesBody := requestedModel != "" && modelName != "" && requestedModel == modelName
-			if requestedMatchesBody && actualModel != "" && requestedModel != actualModel {
+			if requestedModel != "" && actualModel != "" && requestedModel != actualModel && modelName != actualModel {
 				displayModelName = fmt.Sprintf("%s → %s", requestedModel, actualModel)
 				if upstreamModel != "" && actualModel != upstreamModel && modelName != upstreamModel {
 					displayModelName = fmt.Sprintf("%s → %s", displayModelName, upstreamModel)
@@ -344,6 +375,14 @@ func GinLogrusLogger(cfg *config.Config) gin.HandlerFunc {
 			logLine = logLine + " | upstream=" + upstreamURL
 		}
 
+		// tokensLogged tracks whether we successfully appended a tokens segment
+		// in this iteration. When streaming requests cannot extract usage from
+		// the response body, we still want to flag the request as streamed so
+		// operators can tell why tokens are missing. The flag is computed before
+		// the (streamed) segment so we only emit "(streamed)" when no token
+		// detail is available.
+		tokensLogged := false
+
 		// Append token usage if available
 		if isAIAPIPath(path) {
 			detail := getUsageDetailFromContext(c)
@@ -370,8 +409,13 @@ func GinLogrusLogger(cfg *config.Config) gin.HandlerFunc {
 					// Mark that gin_logger already included usage in this log line
 					// so that publishRecord doesn't emit a duplicate completion log.
 					c.Set("__usage_logged__", true)
+					tokensLogged = true
 				}
 			}
+		}
+
+		if isAIAPIPath(path) && len(requestBody) > 0 && gjson.GetBytes(requestBody, "stream").Bool() && !tokensLogged {
+			logLine = logLine + " | (streamed)"
 		}
 
 		if creditsUsed(c) {
@@ -384,7 +428,7 @@ func GinLogrusLogger(cfg *config.Config) gin.HandlerFunc {
 		logBodies := isAIAPIPath(path) && (statusCode >= http.StatusBadRequest || (cfg != nil && cfg.RequestLogSuccessBody))
 		if logBodies {
 			if len(requestBody) > 0 {
-				logLine = logLine + " | request=" + formatDetailedLogBody(cfg, requestBody)
+				logLine = logLine + " | request=" + formatDetailedRequestLogBody(cfg, path, requestBody)
 			}
 			if apiResponse, exists := c.Get("API_RESPONSE"); exists {
 				if bodyBytes, ok := apiResponse.([]byte); ok && len(bodyBytes) > 0 {

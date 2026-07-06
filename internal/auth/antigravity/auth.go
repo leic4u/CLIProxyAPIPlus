@@ -3,14 +3,15 @@ package antigravity
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/oauthform"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/util"
@@ -28,6 +29,13 @@ type TokenResponse struct {
 // userInfo represents Google user profile
 type userInfo struct {
 	Email string `json:"email"`
+}
+
+// antigravityState is the reconstructed PKCE state returned from the OAuth
+// provider's redirect. The reference cortexkit client uses the same shape.
+type antigravityState struct {
+	Index     string `json:"index"` // PKCE verifier – kept as "index" for compatibility with the reference client's decode path
+	ProjectId string `json:"projectId"`
 }
 
 // AntigravityAuth handles Antigravity OAuth authentication
@@ -81,7 +89,7 @@ func (o *AntigravityAuth) shortUserAgent() string {
 }
 
 func (o *AntigravityAuth) nodeUserAgent() string {
-	return misc.AntigravityLoadCodeAssistUserAgent("")
+	return misc.AntigravityOnboardUserUserAgent("")
 }
 
 func antigravityLoadCodeAssistMetadata() map[string]string {
@@ -147,35 +155,78 @@ func defaultAntigravityTierID(loadResp map[string]any) string {
 }
 
 // BuildAuthURL generates the OAuth authorization URL.
-func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string) string {
+//
+// state is opaque from the caller's perspective — for PKCE flows it is expected
+// to be the base64url(JSON) state produced by encodeAntigravityState which
+// embeds the PKCE verifier and optional projectId, matching the cortexkit
+// reference client.
+//
+// redirectURI is the local OAuth callback URI to embed in the request.
+//
+// pkceCodes is required for Google OAuth on public clients; pass nil only when
+// running against a custom authorization server that does not require PKCE.
+func (o *AntigravityAuth) BuildAuthURL(state, redirectURI string, pkceCodes *PKCECodes) string {
 	if strings.TrimSpace(redirectURI) == "" {
 		redirectURI = fmt.Sprintf("http://localhost:%d/oauth-callback", CallbackPort)
 	}
-	params := url.Values{}
-	params.Set("access_type", "offline")
-	params.Set("client_id", ClientID)
-	params.Set("prompt", "consent")
-	params.Set("redirect_uri", redirectURI)
-	params.Set("response_type", "code")
-	params.Set("scope", strings.Join(Scopes, " "))
-	params.Set("state", state)
-	return o.authEndpoint() + "?" + params.Encode()
+	query := oauthform.Encode(
+		oauthform.Pair{Key: "client_id", Value: ClientID},
+		oauthform.Pair{Key: "response_type", Value: "code"},
+		oauthform.Pair{Key: "redirect_uri", Value: redirectURI},
+		oauthform.Pair{Key: "scope", Value: strings.Join(Scopes, " ")},
+		oauthform.Pair{Key: "code_challenge", Value: pkceCodeChallenge(pkceCodes)},
+		oauthform.Pair{Key: "code_challenge_method", Value: "S256"},
+		oauthform.Pair{Key: "state", Value: state},
+		oauthform.Pair{Key: "access_type", Value: "offline"},
+		oauthform.Pair{Key: "prompt", Value: "consent"},
+	)
+	return o.authEndpoint() + "?" + query
 }
 
-// ExchangeCodeForTokens exchanges authorization code for access and refresh tokens
-func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI string) (*TokenResponse, error) {
-	data := url.Values{}
-	data.Set("code", code)
-	data.Set("client_id", ClientID)
-	data.Set("client_secret", ClientSecret)
-	data.Set("redirect_uri", redirectURI)
-	data.Set("grant_type", "authorization_code")
+func pkceCodeChallenge(pkceCodes *PKCECodes) string {
+	if pkceCodes == nil {
+		return ""
+	}
+	return pkceCodes.CodeChallenge
+}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.tokenEndpoint(), strings.NewReader(data.Encode()))
+// ExchangeCodeForTokens exchanges authorization code for access and refresh tokens.
+//
+// state must be the value originally passed to BuildAuthURL. For PKCE flows
+// the state encodes the verifier; this function decodes the state and sends
+// the code_verifier in the token POST body, matching the cortexkit
+// reference client.
+//
+// When state does not carry a PKCE verifier (legacy flows), pkceCodes can be
+// passed explicitly to provide the code_verifier directly.
+func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redirectURI, state string, pkceCodes *PKCECodes) (*TokenResponse, error) {
+	verifier := ""
+	if decoded, ok := DecodeAntigravityState(state); ok {
+		verifier = decoded.Index
+	}
+	if verifier == "" && pkceCodes != nil {
+		verifier = pkceCodes.CodeVerifier
+	}
+
+	// Field order mirrors cortexkit/antigravity-auth exchangeAntigravity():
+	// client_id, client_secret, code, grant_type, redirect_uri, code_verifier.
+	body := oauthform.Encode(
+		oauthform.Pair{Key: "client_id", Value: ClientID},
+		oauthform.Pair{Key: "client_secret", Value: ClientSecret},
+		oauthform.Pair{Key: "code", Value: code},
+		oauthform.Pair{Key: "grant_type", Value: "authorization_code"},
+		oauthform.Pair{Key: "redirect_uri", Value: redirectURI},
+		oauthform.Pair{Key: "code_verifier", Value: verifier},
+	)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, o.tokenEndpoint(), strings.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("antigravity token exchange: create request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded;charset=UTF-8")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("User-Agent", GeminicliUserAgent)
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -196,7 +247,7 @@ func (o *AntigravityAuth) ExchangeCodeForTokens(ctx context.Context, code, redir
 		if body == "" {
 			return nil, fmt.Errorf("antigravity token exchange: request failed: status %d", resp.StatusCode)
 		}
-		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, body)
+		return nil, fmt.Errorf("antigravity token exchange: request failed: status %d: %s", resp.StatusCode, oauthform.MaskSensitive(body))
 	}
 
 	var token TokenResponse
@@ -217,7 +268,7 @@ func (o *AntigravityAuth) FetchUserInfo(ctx context.Context, accessToken string)
 		return "", fmt.Errorf("antigravity userinfo: create request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", o.shortUserAgent())
+	req.Header.Set("User-Agent", GeminicliUserAgent)
 
 	resp, errDo := o.httpClient.Do(req)
 	if errDo != nil {
@@ -403,4 +454,38 @@ func (o *AntigravityAuth) OnboardUser(ctx context.Context, accessToken, tierID s
 	}
 
 	return "", fmt.Errorf("onboard user did not complete after %d attempts", maxAttempts)
+}
+
+// EncodeAntigravityState produces a base64url-encoded JSON blob containing the
+// PKCE verifier and the optional project id, matching the cortexkit reference
+// client's state encoding. Exposed as a public function for callers that need
+// to mint a state token before invoking BuildAuthURL.
+func EncodeAntigravityState(verifier, projectID string) (string, error) {
+	payload := antigravityState{Index: verifier, ProjectId: projectID}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("antigravity encode state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// DecodeAntigravityState parses a state value produced by EncodeAntigravityState
+// and returns the embedded PKCE verifier and project id. The boolean result is
+// false if the state is empty, malformed, or uses an unexpected shape.
+func DecodeAntigravityState(state string) (antigravityState, bool) {
+	state = strings.TrimSpace(state)
+	if state == "" {
+		return antigravityState{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(state)
+	if err != nil {
+		// The state may be a plain random token from a non-PKCE flow; treat it
+		// as "no embedded verifier" rather than failing the parse.
+		return antigravityState{}, false
+	}
+	var decoded antigravityState
+	if errDecode := json.Unmarshal(raw, &decoded); errDecode != nil {
+		return antigravityState{}, false
+	}
+	return decoded, true
 }

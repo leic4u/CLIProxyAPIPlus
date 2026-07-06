@@ -100,6 +100,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	}
 
 	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	endpoint := "/chat/completions"
 	if opts.Alt == "responses/compact" {
@@ -122,12 +123,11 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	compatCfg := e.resolveCompatConfig(auth)
 	// Provider-specific request transformations
 	// Resolve conflicts between "reasoning" object and "reasoning_effort" string
 	translated = resolveReasoningEffortConflict(translated)
-	// MiniMax models behind opencode.ai/zen/ only accept "adaptive" or "disabled"
-	// for thinking.type. Rewrite "enabled" → "adaptive" for MiniMax only.
-	translated = normalizeOpenCodeZenThinkingType(baseURL, baseModel, translated)
+	translated = normalizeMiniMaxM3ThinkingType(baseModel, translated)
 	if isMiMoModel(baseModel) {
 		translated = applyMiMoReasoningBackfill(translated)
 	}
@@ -146,14 +146,15 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	if isDeepSeekModel(baseModel) {
 		translated = stripDeepSeekUnsupportedFields(translated)
 	}
-	if compatCfg := e.resolveCompatConfig(auth); needsToolCallIDNormalization(baseModel, compatCfg) {
+	if needsToolCallIDNormalization(baseModel, compatCfg) {
 		if normalized, patched, errNorm := normalizeNVIDIAToolCallIDs(translated); patched > 0 && errNorm == nil {
 			translated = normalized
 		}
 	}
-	if compatCfg := e.resolveCompatConfig(auth); isNVIDIACompatProvider(compatCfg) {
+	if isNVIDIACompatProvider(compatCfg) {
 		translated = applyNVIDIAMaxTokensReduction(translated)
 	}
+	translated = stripOpenAICompatProviderUnsupportedFields(e.provider, compatCfg, translated)
 	if opts.Alt == "responses/compact" {
 		if updated, errDelete := sjson.DeleteBytes(translated, "stream"); errDelete == nil {
 			translated = updated
@@ -161,6 +162,16 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 		translated = sanitizeOpenAIResponsesReasoningEncryptedContent(ctx, "openai compat executor", translated)
 	}
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	// xAI provider: enforce 200 tools cap (https://docs.x.ai/docs/guides/function-calling)
+	// Defensive: applies if xAI auth routes through OpenAICompatExecutor (e.g., compat_name set)
+	if e.provider == "xai" {
+		translated = NormalizeXAITools(translated)
+	}
+
+	// Ensure all tool-related id fields are JSON strings (some clients send
+	// numeric or null ids which upstream providers reject).
+	translated = normalizeToolResultIDsToString(translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + endpoint
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -226,7 +237,7 @@ func (e *OpenAICompatExecutor) Execute(ctx context.Context, auth *cliproxyauth.A
 	reporter.EnsurePublished(ctx)
 	// Translate response back to source format when needed
 	var param any
-	out := sdktranslator.TranslateNonStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, body, &param)
+	out := sdktranslator.TranslateNonStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, body, &param)
 	resp = cliproxyexecutor.Response{Payload: out, Headers: httpResp.Header.Clone()}
 	return resp, nil
 }
@@ -337,6 +348,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	}
 
 	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	originalPayloadSource := req.Payload
 	if len(opts.OriginalRequest) > 0 {
@@ -354,12 +366,11 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	requestedModel := helps.PayloadRequestedModel(opts, req.Model)
 	requestPath := helps.PayloadRequestPath(opts)
 	translated = helps.ApplyPayloadConfigWithRequest(e.cfg, baseModel, to.String(), from.String(), "", translated, originalTranslated, requestedModel, requestPath, opts.Headers)
+	compatCfg := e.resolveCompatConfig(auth)
 	// Provider-specific request transformations
 	// Resolve conflicts between "reasoning" object and "reasoning_effort" string
 	translated = resolveReasoningEffortConflict(translated)
-	// MiniMax models behind opencode.ai/zen/ only accept "adaptive" or "disabled"
-	// for thinking.type. Rewrite "enabled" → "adaptive" for MiniMax only.
-	translated = normalizeOpenCodeZenThinkingType(baseURL, baseModel, translated)
+	translated = normalizeMiniMaxM3ThinkingType(baseModel, translated)
 	if isMiMoModel(baseModel) {
 		translated = applyMiMoReasoningBackfill(translated)
 	}
@@ -378,19 +389,30 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 	if isDeepSeekModel(baseModel) {
 		translated = stripDeepSeekUnsupportedFields(translated)
 	}
-	if compatCfg := e.resolveCompatConfig(auth); needsToolCallIDNormalization(baseModel, compatCfg) {
+	if needsToolCallIDNormalization(baseModel, compatCfg) {
 		if normalized, patched, errNorm := normalizeNVIDIAToolCallIDs(translated); patched > 0 && errNorm == nil {
 			translated = normalized
 		}
 	}
-	if compatCfg := e.resolveCompatConfig(auth); isNVIDIACompatProvider(compatCfg) {
+	if isNVIDIACompatProvider(compatCfg) {
 		translated = applyNVIDIAMaxTokensReduction(translated)
 	}
+	translated = stripOpenAICompatProviderUnsupportedFields(e.provider, compatCfg, translated)
 
 	// Request usage data in the final streaming chunk so that token statistics
 	// are captured even when the upstream is an OpenAI-compatible provider.
 	translated, _ = sjson.SetBytes(translated, "stream_options.include_usage", true)
 	reporter.SetTranslatedReasoningEffort(translated, to.String())
+
+	// xAI provider: enforce 200 tools cap (https://docs.x.ai/docs/guides/function-calling)
+	// Defensive: applies if xAI auth routes through OpenAICompatExecutor (e.g., compat_name set)
+	if e.provider == "xai" {
+		translated = NormalizeXAITools(translated)
+	}
+
+	// Ensure all tool-related id fields are JSON strings (some clients send
+	// numeric or null ids which upstream providers reject).
+	translated = normalizeToolResultIDsToString(translated)
 
 	url := strings.TrimSuffix(baseURL, "/") + "/chat/completions"
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(translated))
@@ -486,7 +508,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			}
 
 			// OpenAI-compatible streams must use SSE data lines.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, bytes.Clone(trimmedLine), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -506,7 +528,7 @@ func (e *OpenAICompatExecutor) ExecuteStream(ctx context.Context, auth *cliproxy
 			// In case the upstream close the stream without a terminal [DONE] marker.
 			// Feed a synthetic done marker through the translator so pending
 			// response.completed events are still emitted exactly once.
-			chunks := sdktranslator.TranslateStream(ctx, to, from, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
+			chunks := sdktranslator.TranslateStream(ctx, to, responseFormat, req.Model, opts.OriginalRequest, translated, []byte("data: [DONE]"), &param)
 			for i := range chunks {
 				select {
 				case out <- cliproxyexecutor.StreamChunk{Payload: chunks[i]}:
@@ -642,6 +664,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	baseModel := thinking.ParseSuffix(req.Model).ModelName
 
 	from := opts.SourceFormat
+	responseFormat := cliproxyexecutor.ResponseFormatOrSource(opts)
 	to := sdktranslator.FromString("openai")
 	translated := sdktranslator.TranslateRequest(from, to, baseModel, req.Payload, false)
 
@@ -663,7 +686,7 @@ func (e *OpenAICompatExecutor) CountTokens(ctx context.Context, auth *cliproxyau
 	}
 
 	usageJSON := helps.BuildOpenAIUsageJSON(count)
-	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, from, count, usageJSON)
+	translatedUsage := sdktranslator.TranslateTokenCount(ctx, to, responseFormat, count, usageJSON)
 	return cliproxyexecutor.Response{Payload: translatedUsage}, nil
 }
 
@@ -835,6 +858,29 @@ func (e *OpenAICompatExecutor) resolveCompatConfig(auth *cliproxyauth.Auth) *con
 	return nil
 }
 
+func stripOpenAICompatProviderUnsupportedFields(provider string, compat *config.OpenAICompatibility, payload []byte) []byte {
+	if isKimiOpenAICompatProvider(provider, compat) {
+		return stripKimiUnsupportedFields(payload)
+	}
+	return payload
+}
+
+func isKimiOpenAICompatProvider(provider string, compat *config.OpenAICompatibility) bool {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	if strings.Contains(provider, "kimi") || strings.Contains(provider, "moonshot") {
+		return true
+	}
+	if compat == nil {
+		return false
+	}
+	name := strings.ToLower(strings.TrimSpace(compat.Name))
+	if strings.Contains(name, "kimi") || strings.Contains(name, "moonshot") {
+		return true
+	}
+	baseURL := strings.ToLower(strings.TrimSpace(compat.BaseURL))
+	return strings.Contains(baseURL, "moonshot") || strings.Contains(baseURL, "kimi")
+}
+
 func (e *OpenAICompatExecutor) overrideModel(payload []byte, model string) []byte {
 	if len(payload) == 0 || model == "" {
 		return payload
@@ -910,28 +956,25 @@ func isOpenCodeZenProvider(baseURL string) bool {
 	return strings.Contains(lower, "opencode.ai/zen/")
 }
 
-// isOpenCodeZenMiniMaxModel reports whether the model name targets the
-// MiniMax-M3 upstream behind the opencode.ai/zen/ gateway. MiniMax-M3
-// only allows thinking.type "adaptive" or "disabled" and rejects "enabled".
-// Other providers behind the gateway (e.g. Claude, GPT) accept "enabled"
-// and must not be remapped.
-func isOpenCodeZenMiniMaxModel(model string) bool {
+// isMiniMaxM3Model reports whether the model name targets a MiniMax-M3
+// model, regardless of the upstream gateway. MiniMax-M3 only allows
+// thinking.type "adaptive" or "disabled" and rejects "enabled".
+func isMiniMaxM3Model(model string) bool {
 	lower := strings.ToLower(strings.TrimSpace(model))
 	if lower == "" {
 		return false
 	}
-	// Match the specific MiniMax-M3 model name (case-insensitive).
 	return strings.Contains(lower, "minimax-m3")
 }
 
-// normalizeOpenCodeZenThinkingType rewrites thinking.type from "enabled"
-// to "adaptive" for MiniMax models served via the opencode.ai/zen/ gateway,
-// since MiniMax only allows "adaptive" or "disabled" and rejects "enabled".
+// normalizeMiniMaxM3ThinkingType rewrites thinking.type from "enabled"
+// to "adaptive" for MiniMax-M3 models, since MiniMax only allows
+// "adaptive" or "disabled" and rejects "enabled".
 // If thinking.type is "disabled" or "adaptive", it is left untouched.
-// Non-MiniMax models are not affected, since other providers behind the
-// gateway (e.g. Claude, GPT) accept "enabled".
-func normalizeOpenCodeZenThinkingType(baseURL, model string, body []byte) []byte {
-	if !isOpenCodeZenProvider(baseURL) || !isOpenCodeZenMiniMaxModel(model) || len(body) == 0 || !gjson.ValidBytes(body) {
+// Non-MiniMax models are not affected, since other providers (e.g. Claude,
+// GPT) accept "enabled".
+func normalizeMiniMaxM3ThinkingType(model string, body []byte) []byte {
+	if !isMiniMaxM3Model(model) || len(body) == 0 || !gjson.ValidBytes(body) {
 		return body
 	}
 	thinkingType := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "thinking.type").String()))
@@ -1111,6 +1154,66 @@ func (e *OpenAICompatExecutor) fixMistralMessageOrder(payload []byte) []byte {
 		return payload
 	}
 	return next
+}
+
+// normalizeToolResultIDsToString ensures all tool-related id fields in the
+// request payload are JSON strings.  Some clients send numeric or null id
+// values which upstream providers (e.g. north-mini-code-free) reject with
+// "A tool result's output's id field must be a string".
+//
+// The function inspects both the chat-completions format (messages array)
+// and the responses format (input array) and coerces non-string id/call_id/
+// tool_call_id fields to their string representation via sjson.
+func normalizeToolResultIDsToString(body []byte) []byte {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return body
+	}
+	out := body
+
+	// --- Chat completions format: messages array ---
+	messages := gjson.GetBytes(out, "messages")
+	if messages.Exists() && messages.IsArray() {
+		for msgIdx, msg := range messages.Array() {
+			// tool role messages: ensure tool_call_id is a string
+			if msg.Get("role").String() == "tool" {
+				tcID := msg.Get("tool_call_id")
+				if tcID.Exists() && tcID.Type != gjson.String {
+					path := fmt.Sprintf("messages.%d.tool_call_id", msgIdx)
+					out, _ = sjson.SetBytes(out, path, tcID.String())
+				}
+			}
+			// assistant messages with tool_calls: ensure each tool call id is a string
+			toolCalls := msg.Get("tool_calls")
+			if toolCalls.Exists() && toolCalls.IsArray() {
+				for callIdx, call := range toolCalls.Array() {
+					idVal := call.Get("id")
+					if idVal.Exists() && idVal.Type != gjson.String {
+						path := fmt.Sprintf("messages.%d.tool_calls.%d.id", msgIdx, callIdx)
+						out, _ = sjson.SetBytes(out, path, idVal.String())
+					}
+				}
+			}
+		}
+	}
+
+	// --- Responses format: input array ---
+	input := gjson.GetBytes(out, "input")
+	if input.Exists() && input.IsArray() {
+		for itemIdx, item := range input.Array() {
+			itemType := item.Get("type").String()
+			if itemType == "function_call" || itemType == "function_call_output" {
+				for _, field := range []string{"id", "call_id"} {
+					val := item.Get(field)
+					if val.Exists() && val.Type != gjson.String {
+						path := fmt.Sprintf("input.%d.%s", itemIdx, field)
+						out, _ = sjson.SetBytes(out, path, val.String())
+					}
+				}
+			}
+		}
+	}
+
+	return out
 }
 
 type statusErr struct {
